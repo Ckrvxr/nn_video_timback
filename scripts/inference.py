@@ -81,8 +81,8 @@ def main():
         if not ret:
             break
 
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_tensor = torch.from_numpy(frame_rgb).float().permute(2, 0, 1).unsqueeze(0) / 127.5 - 1.0
+        frame_yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+        frame_tensor = torch.from_numpy(frame_yuv).float().permute(2, 0, 1).unsqueeze(0) / 127.5 - 1.0
         buffer.append(frame_tensor.to(device))
 
         if len(buffer) < 3:
@@ -99,7 +99,7 @@ def main():
 
             pred_img = pred.squeeze(0).permute(1, 2, 0).cpu().numpy()
             pred_img = np.clip((pred_img + 1) * 127.5, 0, 255).astype(np.uint8)
-            pred_img = cv2.cvtColor(pred_img, cv2.COLOR_RGB2BGR)
+            pred_img = cv2.cvtColor(pred_img, cv2.COLOR_YUV2BGR)
             writer.write(pred_img)
 
         frame_idx += 1
@@ -114,7 +114,7 @@ def main():
                 pred = model(f_prev, f_cur, f_next, scale=args.scale)
             pred_img = pred.squeeze(0).permute(1, 2, 0).cpu().numpy()
             pred_img = np.clip((pred_img + 1) * 127.5, 0, 255).astype(np.uint8)
-            pred_img = cv2.cvtColor(pred_img, cv2.COLOR_RGB2BGR)
+            pred_img = cv2.cvtColor(pred_img, cv2.COLOR_YUV2BGR)
             writer.write(pred_img)
 
     cap.release()
