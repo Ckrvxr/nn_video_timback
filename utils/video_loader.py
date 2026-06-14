@@ -16,10 +16,10 @@ def load_video_frames(video_path: str) -> list[np.ndarray]:
             y = np.frombuffer(bytes(frame.planes[0]), dtype=np.uint8).reshape(h, w)
             u = cv2.resize(
                 np.frombuffer(bytes(frame.planes[1]), dtype=np.uint8).reshape(h // 2, w // 2),
-                (w, h), interpolation=cv2.INTER_LINEAR)
+                (w, h), interpolation=cv2.INTER_CUBIC)
             v = cv2.resize(
                 np.frombuffer(bytes(frame.planes[2]), dtype=np.uint8).reshape(h // 2, w // 2),
-                (w, h), interpolation=cv2.INTER_LINEAR)
+                (w, h), interpolation=cv2.INTER_CUBIC)
             frames.append(np.stack([y, u, v], axis=-1))
     return frames
 
