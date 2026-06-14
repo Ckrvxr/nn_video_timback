@@ -26,9 +26,10 @@ class AV1VSR(nn.Module):
         self.alignment = SimpleWarpAlign(n_features)
         self.fusion = TSAFusion(n_features)
 
+        dilations = [1, 2, 2, 1]
         backbone = []
-        for _ in range(n_blocks):
-            backbone.append(ResBlock(n_features))
+        for i in range(n_blocks):
+            backbone.append(ResBlock(n_features, dilation=dilations[i % len(dilations)]))
         self.backbone = nn.Sequential(*backbone)
         self.conv_last = nn.Conv2d(n_features, n_features, 3, padding=1, bias=False)
 
