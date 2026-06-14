@@ -1,0 +1,86 @@
+---
+# AV1-VSR Configuration
+
+# Project
+project_name: av1_vsr
+output_dir: checkpoints
+seed: 42
+
+# Data
+data:
+  root: ./data/datasets
+  datasets: [reds, bvi_dvc, vimeo_90k]
+  patch_size: 256
+  frames: 3  # t-1, t, t+1
+  scales: [1, 2, 3, 4, 5, 6]
+  workers: 8
+  prefetch: 4
+
+# AV1 Compression
+av1:
+  encoders: [svt, aom]
+  svt_crf: [30, 40, 50, 60]
+  aom_crf: [30, 40, 50, 60]
+  svt_params: -svtav1-params tune=0:enable-overlays=1
+  aom_params: -cpu-used 4
+
+# Model
+model:
+  n_features: 64
+  n_rcab: 8
+  n_fusion_heads: 1
+  scales: [1, 2, 3, 4, 5, 6]
+
+# Training
+training:
+  batch_size: 16
+  lr: 2.0e-4
+  lr_min: 1.0e-6
+  weight_decay: 1.0e-4
+  beta1: 0.9
+  beta2: 0.99
+  epochs: 100
+  clip_grad: 1.0
+  amp: true
+
+  phases:
+    phase1:
+      epochs: 100
+      lr: 2.0e-4
+      data: clean  # clean LR -> HR
+      desc: Clean VSR pretraining
+
+    phase2:
+      epochs: 150
+      lr: 5.0e-5
+      data: compressed  # AV1 compressed -> HR
+      desc: AV1 artifact removal fine-tuning
+
+    phase3:
+      epochs: 50
+      lr: 1.0e-5
+      data: compressed
+      gan: true
+      desc: Perceptual enhancement (GAN)
+
+# Loss weights
+loss:
+  charbonnier: 1.0
+  ms_ssim: 0.1
+  perceptual: 0.05
+  temporal: 0.1
+  adversarial: 0.01
+
+# Logging
+logging:
+  log_interval: 50
+  save_interval: 5
+  val_interval: 1
+  use_wandb: false
+  wandb_project: av1-vsr
+
+# Inference
+inference:
+  tile_size: 1024
+  overlap: 64
+  fp16: true

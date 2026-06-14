@@ -1,0 +1,65 @@
+[workspace]
+authors = ["Ckrvxr"]
+channels = ["conda-forge"]
+name = "video_timback"
+platforms = ["osx-arm64", "linux-64"]
+version = "0.1.0"
+
+[system-requirements]
+cuda = "12"
+
+[dependencies]
+python = ">=3.11,<3.13"
+numpy = "*"
+opencv = "*"
+pillow = "*"
+scipy = "*"
+ffmpeg = "*"
+tensorboard = "*"
+pyyaml = "*"
+tqdm = "*"
+h5py = "*"
+scikit-image = "*"
+
+[pypi-dependencies]
+wandb = "*"
+lpips = "*"
+onnx = "*"
+
+[target.linux-64.pypi-dependencies]
+decord = "*"
+
+[target.osx-arm64.dependencies]
+pytorch = "*"
+torchvision = "*"
+
+[target.linux-64.dependencies]
+pytorch-gpu = "*"
+torchvision = "*"
+cuda-version = "12.6.*"
+svt-av1 = "*"
+
+[feature.dev.dependencies]
+pytest = "*"
+ruff = "*"
+ipython = "*"
+jupyter = "*"
+
+[tasks]
+gen-data = "python data/generate_pairs.py --config configs/default.yaml"
+gen-data-svt = "python data/generate_pairs.py --encoder svt"
+gen-data-aom = "python data/generate_pairs.py --encoder aom"
+train-phase1 = "python train.py --config configs/default.yaml --phase 1"
+train-phase2 = "python train.py --config configs/default.yaml --phase 2"
+train-phase3 = "python train.py --config configs/default.yaml --phase 3"
+test = "python test.py --checkpoint checkpoints/phase2_av1_finetune/best.pth"
+metrics = "python test.py --metrics psnr ssim vmaf"
+infer = "python inference.py --input video.mp4 --output out.mp4 --scale 4"
+infer-1x = "python inference.py --input video.mp4 --output out.mp4 --scale 1"
+export-onnx = "python scripts/export_onnx.py --checkpoint ckpt.pth --scale 4"
+lint = "ruff check ."
+test-all = "pytest tests/ -v"
+
+[environments]
+default = { solve-group = "prod" }
+dev = { features = ["dev"], solve-group = "prod" }

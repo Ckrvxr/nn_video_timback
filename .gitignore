@@ -1,0 +1,16 @@
+.pixi/
+pixi.lock
+checkpoints/
+__pycache__/
+*.pyc
+*.so
+.DS_Store
+*.pth
+*.onnx
+data/datasets/
+*.mp4
+*.mkv
+*.avi
+*.mov
+wandb/
+lightning_logs/

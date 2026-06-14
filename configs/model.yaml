@@ -1,0 +1,38 @@
+---
+# Model architecture parameters
+
+model:
+  # Feature extraction
+  in_channels: 3
+  n_features: 64
+  kernel_size: 3
+
+  # Alignment
+  alignment:
+    type: flow_guided_dcn  # flow_guided_dcn | pcd
+    flow_net: pwcnt         # pwcnt | raft
+    dcn_kernel: 3
+    dcn_padding: 1
+
+  # Fusion
+  fusion:
+    type: tsa               # tsa | concat | attention
+    n_heads: 1
+
+  # Backbone
+  backbone:
+    type: rcab              # rcab | resblock | swinir
+    n_blocks: 8
+    reduction: 16           # channel attention reduction ratio
+
+  # Upsampler
+  upsampler:
+    type: multi_head        # multi_head | iterative | pixel_unshuffle
+    scales: [1, 2, 3, 4, 5, 6]
+    # For 1x: 1x1 conv (identity)
+    # For Mx: Conv -> PixelShuffle(M)
+    # M=2: in_channels -> in_channels * 4
+    # M=3: in_channels -> in_channels * 9
+    # M=4: in_channels -> in_channels * 16
+    # M=5: in_channels -> in_channels * 25
+    # M=6: in_channels -> in_channels * 36
