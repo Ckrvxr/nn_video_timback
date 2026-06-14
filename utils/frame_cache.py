@@ -34,9 +34,12 @@ class FrameCache:
 
     def _load(self, video_path: str) -> list[np.ndarray]:
         if self._blosc_cache:
-            cached = self._blosc_cache.get(video_path)
-            if cached is not None:
-                return [np.require(f, requirements=['OWNDATA']) for f in cached]
+            try:
+                cached = self._blosc_cache.get(video_path)
+                if cached is not None:
+                    return [np.require(f, requirements=['OWNDATA']) for f in cached]
+            except RuntimeError:
+                pass  # corrupted .blp → fallback to PyAV decode
         return load_video_frames(video_path)
 
     def get_or_load(self, hr_path: Path, lr_path: Path):

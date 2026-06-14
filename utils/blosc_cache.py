@@ -25,11 +25,15 @@ class BloscCache:
         cp = self.cache_path(video_path)
         if not cp.exists():
             return None
-        with open(cp, 'rb') as f:
-            hdr = f.read(4)
-            compressed = f.read()
-        h, w = np.frombuffer(hdr, dtype=np.uint16)
-        arr = blosc.unpack_array(compressed)
+        try:
+            with open(cp, 'rb') as f:
+                hdr = f.read(4)
+                compressed = f.read()
+            h, w = np.frombuffer(hdr, dtype=np.uint16)
+            arr = blosc.unpack_array(compressed)
+        except Exception as e:
+            raise RuntimeError(f'Cache decompress failed: {e}  file: {cp}') from e
+
         n = int(h) * int(w)
         n_uv = (int(h) // 2) * (int(w) // 2)
         out = []
@@ -58,18 +62,17 @@ class BloscCache:
                            interpolation=self.uv_interp).ravel()
             rows.append(np.concatenate([y, u, v]))
         arr = np.stack(rows, axis=0)
-        compressed = blosc.pack_array(
-            arr, cname=self.cname, clevel=self.clevel, shuffle=blosc.NOSHUFFLE)
+        try:
+            compressed = blosc.pack_array(
+                arr, cname=self.cname, clevel=self.clevel, shuffle=blosc.NOSHUFFLE)
+        except Exception as e:
+            raise RuntimeError(f'Cache compress failed: {e}  file: {cp}') from e
         with open(cp, 'wb') as f:
             f.write(np.array([h, w], dtype=np.uint16).tobytes())
             f.write(compressed)
 
     def put_raw(self, video_path: str | Path, raw_frames: list[tuple[np.ndarray, np.ndarray, np.ndarray]]):
-        """Store native YUV420 planes directly — no YUV444 intermediate.
-
-        Each tuple is (Y_plane (H,W), U_plane (H/2,W/2), V_plane (H/2,W/2)).
-        Eliminates the up→down redundant cycle for U/V.
-        """
+        """Store native YUV420 planes directly — no YUV444 intermediate."""
         cp = self.cache_path(video_path)
         cp.parent.mkdir(parents=True, exist_ok=True)
         h, w = raw_frames[0][0].shape[:2]
@@ -80,8 +83,11 @@ class BloscCache:
             rows.append(np.concatenate([
                 y_plane.ravel(), u_plane.ravel(), v_plane.ravel()]))
         arr = np.stack(rows, axis=0)
-        compressed = blosc.pack_array(
-            arr, cname=self.cname, clevel=self.clevel, shuffle=blosc.NOSHUFFLE)
+        try:
+            compressed = blosc.pack_array(
+                arr, cname=self.cname, clevel=self.clevel, shuffle=blosc.NOSHUFFLE)
+        except Exception as e:
+            raise RuntimeError(f'Cache compress failed: {e}  file: {cp}') from e
         with open(cp, 'wb') as f:
             f.write(np.array([h, w], dtype=np.uint16).tobytes())
             f.write(compressed)
