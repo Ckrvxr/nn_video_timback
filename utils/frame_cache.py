@@ -1,4 +1,3 @@
-import warnings
 import threading
 from pathlib import Path
 
@@ -40,7 +39,7 @@ class FrameCache:
                 if cached is not None:
                     return [np.require(f, requirements=['OWNDATA']) for f in cached]
             except RuntimeError:
-                warnings.warn(f'Cache corrupted, falling back to PyAV decode: {video_path}')
+                print(f'[WARN] Cache corrupted, falling back to PyAV: {video_path}', flush=True)
         return load_video_frames(video_path)
 
     def get_or_load(self, hr_path: Path, lr_path: Path):
