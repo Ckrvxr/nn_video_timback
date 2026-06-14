@@ -21,7 +21,7 @@ model:
 
   # Backbone
   backbone:
-    type: rcab              # rcab | resblock | swinir
+    type: naf                # naf | rcab | resblock | swinir
     n_blocks: 8
     reduction: 16           # channel attention reduction ratio
 

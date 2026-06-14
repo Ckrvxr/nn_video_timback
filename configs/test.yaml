@@ -1,14 +1,17 @@
 ---
+# Test config — 2 epochs, inherits all settings from prod.yaml
 project_name: av1_vsr
-output_dir: checkpoints
+output_dir: checkpoints/test
 seed: 42
 
 data:
   root: ./data/datasets
   patch_size: 256
-  frames: 3
-  workers: 8
+  frames: 5
+  val_batch_size: 16
+  workers: 0
   data_type: compressed
+  scales: [1, 2, 3, 4]
 
 model:
   n_features: 32
@@ -17,8 +20,8 @@ model:
   scales: [1, 2, 3, 4, 5, 6]
 
 training:
-  batch_size: 16
-  epochs: 100
+  batch_size: 32
+  epochs: 2
   lr: 2.0e-4
   lr_min: 1.0e-6
   weight_decay: 1.0e-4
@@ -29,8 +32,12 @@ training:
 
 loss:
   charbonnier: 1.0
+  sobel_gradient: 0.03
+  laplacian: 0.02
   ms_ssim: 0.1
-
+  gaussian_soft_histogram: 0.01
+  total_variation: 0.001
+  temporal_consistency: 0.1
 
 logging:
   log_interval: 50

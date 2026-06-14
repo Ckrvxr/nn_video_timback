@@ -2,7 +2,7 @@
 authors = ["Ckrvxr"]
 channels = ["conda-forge"]
 name = "video_timback"
-platforms = ["osx-arm64", "linux-64"]
+platforms = ["osx-arm64", "linux-64", "win-64"]
 version = "0.1.0"
 
 [system-requirements]
@@ -25,9 +25,7 @@ scikit-image = "*"
 wandb = "*"
 lpips = "*"
 onnx = "*"
-
-[target.linux-64.pypi-dependencies]
-decord = "*"
+huggingface-hub = "*"
 
 [target.osx-arm64.dependencies]
 pytorch = "*"
@@ -39,6 +37,15 @@ torchvision = "*"
 cuda-version = "12.6.*"
 svt-av1 = "*"
 
+[target.win-64.dependencies]
+pytorch-gpu = "*"
+torchvision = "*"
+cuda-version = "12.6.*"
+svt-av1 = "*"
+
+[target.win-64.pypi-dependencies]
+onnxruntime-gpu = ">=1.26.0, <2"
+
 [feature.dev.dependencies]
 pytest = "*"
 ruff = "*"
@@ -46,19 +53,36 @@ ipython = "*"
 jupyter = "*"
 
 [tasks]
-gen-data = "python data/generate_pairs.py --config configs/default.yaml"
-gen-data-svt = "python data/generate_pairs.py --encoder svt"
-gen-data-aom = "python data/generate_pairs.py --encoder aom"
-train-phase1 = "python train.py --config configs/default.yaml --phase 1"
-train-phase2 = "python train.py --config configs/default.yaml --phase 2"
-train-phase3 = "python train.py --config configs/default.yaml --phase 3"
-test = "python test.py --checkpoint checkpoints/phase2_av1_finetune/best.pth"
-metrics = "python test.py --metrics psnr ssim vmaf"
-infer = "python inference.py --input video.mp4 --output out.mp4 --scale 4"
-infer-1x = "python inference.py --input video.mp4 --output out.mp4 --scale 1"
+
+# ═══════════════════════════════════════════
+#  🧪 Test — 快速迭代测试
+# ═══════════════════════════════════════════
+test-train = "python train.py --config configs/test.yaml"
+test-val   = "python scripts/run_validate.py --config configs/test.yaml --video data/raw_videos/test_clip_1.mp4 --checkpoint checkpoints/test/best.pth --crf 40 --preset 10 --output output/validate/val_test.mp4 --tile-size 960 --tile-overlap 0 --scale 1"
+
+# ═══════════════════════════════════════════
+#  🏭 Prod — 生产训练与验证
+# ═══════════════════════════════════════════
+prod-train = "python train.py --config configs/prod.yaml"
+prod-val   = "python scripts/run_validate.py --config configs/prod.yaml --video data/raw_videos/test_clip_1.mp4 --checkpoint checkpoints/prod/best.pth --crf 40 --preset 10 --output output/validate/val_prod.mp4 --tile-size 960 --tile-overlap 0 --scale 1"
+
+# ═══════════════════════════════════════════
+#  🛠  Tools — 数据生成、lint、测试
+# ═══════════════════════════════════════════
+gen-data         = "python data/generate_pairs.py --config configs/default.yaml"
+gen-data-svt     = "python data/generate_pairs.py --encoder svt"
+gen-data-aom     = "python data/generate_pairs.py --encoder aom"
+prepare-realisvideo = "python scripts/prepare_realisvideo.py --max-frames 100 --workers 2"
+lint         = "ruff check ."
+test-all     = "pytest tests/ -v"
+
+# ═══════════════════════════════════════════
+#  🚀  Inference — 推理与导出
+# ═══════════════════════════════════════════
+infer       = "python inference.py --input video.mp4 --output out.mp4 --scale 4"
+infer-1x    = "python inference.py --input video.mp4 --output out.mp4 --scale 1"
 export-onnx = "python scripts/export_onnx.py --checkpoint ckpt.pth --scale 4"
-lint = "ruff check ."
-test-all = "pytest tests/ -v"
+
 
 [environments]
 default = { solve-group = "prod" }

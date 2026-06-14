@@ -30,13 +30,15 @@ class TemporalConsistencyLoss(nn.Module):
         self,
         pred_cur: torch.Tensor,
         pred_next: torch.Tensor,
-        flow: torch.Tensor,
+        flow: torch.Tensor = None,
     ) -> torch.Tensor:
-        warp_next = self._flow_warp(pred_next, flow)
+        warp_next = self._flow_warp(pred_next, flow) if flow is not None else pred_next
         diff = pred_cur - warp_next
 
-        grad_x = F.conv2d(diff, self.sobel_x.repeat(3, 1, 1, 1), padding=1, groups=3)
-        grad_y = F.conv2d(diff, self.sobel_y.repeat(3, 1, 1, 1), padding=1, groups=3)
+        k_x = self.sobel_x.to(dtype=diff.dtype, device=diff.device).repeat(3, 1, 1, 1)
+        k_y = self.sobel_y.to(dtype=diff.dtype, device=diff.device).repeat(3, 1, 1, 1)
+        grad_x = F.conv2d(diff, k_x, padding=1, groups=3)
+        grad_y = F.conv2d(diff, k_y, padding=1, groups=3)
 
         edge_mask = torch.exp(-10 * (grad_x ** 2 + grad_y ** 2).mean(dim=1, keepdim=True))
         loss = torch.mean(torch.abs(diff) * edge_mask.detach())

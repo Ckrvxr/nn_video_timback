@@ -55,7 +55,7 @@ def main():
     model = AV1VSR(
         in_channels=3,
         n_features=config['model']['n_features'],
-        n_rcab=config['model']['n_rcab'],
+        n_blocks=config['model']['n_blocks'],
         scales=config['model']['scales'],
     ).to(device)
 

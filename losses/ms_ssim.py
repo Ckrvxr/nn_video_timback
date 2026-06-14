@@ -3,58 +3,52 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _to_01(x: torch.Tensor) -> torch.Tensor:
+    return (x + 1) * 0.5
+
+
 def gaussian_kernel(size: int, sigma: float) -> torch.Tensor:
-    coords = torch.arange(size, dtype=torch.float32)
-    coords -= size // 2
-    kernel = torch.exp(-coords ** 2 / (2 * sigma ** 2))
-    kernel /= kernel.sum()
-    return kernel.view(1, 1, size, 1) * kernel.view(1, 1, 1, size)
+    coords = torch.arange(size, dtype=torch.float32) - size // 2
+    g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    return g / g.sum()
 
 
-def ssim(
-    img1: torch.Tensor, img2: torch.Tensor,
-    kernel: torch.Tensor, c1: float, c2: float,
-) -> torch.Tensor:
-    ch = img1.shape[1]
-    kernel = kernel.repeat(ch, 1, 1, 1).to(img1.device)
-
-    mu1 = F.conv2d(img1, kernel, padding=kernel.shape[-1] // 2, groups=ch)
-    mu2 = F.conv2d(img2, kernel, padding=kernel.shape[-1] // 2, groups=ch)
-
-    mu1_sq = mu1 ** 2
-    mu2_sq = mu2 ** 2
-    mu1_mu2 = mu1 * mu2
-
-    sigma1_sq = F.conv2d(img1 * img1, kernel, padding=kernel.shape[-1] // 2, groups=ch) - mu1_sq
-    sigma2_sq = F.conv2d(img2 * img2, kernel, padding=kernel.shape[-1] // 2, groups=ch) - mu2_sq
-    sigma12 = F.conv2d(img1 * img2, kernel, padding=kernel.shape[-1] // 2, groups=ch) - mu1_mu2
-
-    ssim_map = ((2 * mu1_mu2 + c1) * (2 * sigma12 + c2)) / \
-               ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
-    return ssim_map
+def create_window(size: int, sigma: float, channel: int) -> torch.Tensor:
+    ker = gaussian_kernel(size, sigma)
+    ker = ker[:, None] * ker[None, :]
+    ker = ker.expand(channel, 1, size, size).contiguous()
+    return ker
 
 
 class MSSSIMLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, size: int = 11, sigma: float = 1.5):
         super().__init__()
-        kernel = gaussian_kernel(11, 1.5)
-        self.register_buffer('kernel', kernel)
-        self.weights = [0.0448, 0.2856, 0.3001, 0.2363, 0.1333]
+        self.size = size
+        self.sigma = sigma
+        self.register_buffer('window', create_window(size, sigma, 3))
+
+    def _ssim(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        C1 = (0.01 * 2) ** 2
+        C2 = (0.03 * 2) ** 2
+        window = self.window.to(x.device, dtype=x.dtype)
+        mu_x = F.conv2d(x, window, groups=3, padding=self.size // 2)
+        mu_y = F.conv2d(y, window, groups=3, padding=self.size // 2)
+        sigma_x = F.conv2d(x * x, window, groups=3, padding=self.size // 2) - mu_x ** 2
+        sigma_y = F.conv2d(y * y, window, groups=3, padding=self.size // 2) - mu_y ** 2
+        sigma_xy = F.conv2d(x * y, window, groups=3, padding=self.size // 2) - mu_x * mu_y
+        cs = (2 * sigma_xy + C2) / (sigma_x + sigma_y + C2)
+        ssim = (2 * mu_x * mu_y + C1) / (mu_x ** 2 + mu_y ** 2 + C1) * cs
+        return ssim.mean(), cs.mean()
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        c1 = (0.01 * 2) ** 2
-        c2 = (0.03 * 2) ** 2
-
-        pred = pred.clamp(0, 1)
-        target = target.clamp(0, 1)
-
-        msssim = 1.0
-        for w in self.weights:
-            ssim_map = ssim(pred, target, self.kernel, c1, c2).mean(dim=1)
-            msssim = msssim * (ssim_map.mean() ** w)
-
-            if len(self.weights) > 1:
-                pred = F.avg_pool2d(pred, 2)
-                target = F.avg_pool2d(target, 2)
-
-        return 1 - msssim
+        x, y = _to_01(pred), _to_01(target)
+        weights = [0.0448, 0.2856, 0.3001, 0.2363, 0.1333]
+        cs = []
+        for i in range(4):
+            _, c = self._ssim(x, y)
+            cs.append(c)
+            x = F.avg_pool2d(x, 2)
+            y = F.avg_pool2d(y, 2)
+        ssim, _ = self._ssim(x, y)
+        cs = torch.stack(cs, dim=0)
+        return 1 - ssim * (cs ** torch.tensor(weights[:4], device=cs.device)).prod(dim=0)

@@ -9,18 +9,18 @@ class TSAFusion(nn.Module):
         self.conv1x1 = nn.Conv2d(n_features * 3, n_features, 1, bias=False)
 
         self.temporal_attn = nn.Sequential(
-            nn.Conv2d(n_features, n_features, 3, padding=1),
+            nn.Conv2d(n_features, n_features, 3, padding=1, bias=False),
             nn.PReLU(n_features),
-            nn.Conv2d(n_features, n_features, 3, padding=1),
+            nn.Conv2d(n_features, n_features, 3, padding=1, bias=False),
             nn.PReLU(n_features),
-            nn.Conv2d(n_features, 2, 3, padding=1),
+            nn.Conv2d(n_features, 2, 3, padding=1, bias=False),
             nn.Sigmoid(),
         )
 
         self.spatial_attn = nn.Sequential(
-            nn.Conv2d(n_features, n_features // 4, 1),
+            nn.Conv2d(n_features, n_features // 4, 1, bias=False),
             nn.ReLU(True),
-            nn.Conv2d(n_features // 4, 1, 1),
+            nn.Conv2d(n_features // 4, 1, 1, bias=False),
             nn.Sigmoid(),
         )
 

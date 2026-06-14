@@ -31,7 +31,7 @@ def main():
     model = AV1VSR(
         in_channels=3,
         n_features=config['model']['n_features'],
-        n_rcab=config['model']['n_rcab'],
+        n_blocks=config['model']['n_blocks'],
         scales=config['model']['scales'],
     ).to(device)
 
@@ -44,7 +44,7 @@ def main():
         root=config['data']['root'],
         batch_size=1,
         scales=[1, 2, 3, 4],
-        patch_size=None,
+        patch_size=config['data']['patch_size'],
         frames=config['data']['frames'],
         workers=2,
         is_train=False,
@@ -55,25 +55,17 @@ def main():
     for batch in test_loader:
         lr_frames = batch['lr_frames'].to(device)
         hr = batch['hr'].to(device)
-        scales = batch['scale']
+        scale_val = batch['scale']
 
-        for i in range(lr_frames.size(0)):
-            scale_val = int(scales[i].item())
-            f_prev = lr_frames[i, 0:1]
-            f_cur = lr_frames[i, 1:2]
-            f_next = lr_frames[i, 2:3]
-            hr_i = hr[i:i+1]
+        pred = model(lr_frames[:, 0], lr_frames[:, 1], lr_frames[:, 2], scale=scale_val)
 
-            pred = model(f_prev, f_cur, f_next, scale=scale_val)
-
-            key = f'scale_{scale_val}'
-            if key not in results:
-                results[key] = {'psnr': [], 'ssim': []}
-
-            if 'psnr' in args.metrics:
-                results[key]['psnr'].append(calculate_psnr(pred, hr_i))
-            if 'ssim' in args.metrics:
-                results[key]['ssim'].append(calculate_ssim(pred, hr_i))
+        key = f'scale_{scale_val}'
+        if key not in results:
+            results[key] = {'psnr': [], 'ssim': []}
+        if 'psnr' in args.metrics:
+            results[key]['psnr'].append(calculate_psnr(pred, hr))
+        if 'ssim' in args.metrics:
+            results[key]['ssim'].append(calculate_ssim(pred, hr))
 
     for scale_label, vals in sorted(results.items()):
         line = f'{scale_label}: '
