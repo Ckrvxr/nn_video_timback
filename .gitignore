@@ -1,21 +1,56 @@
+# pixi
 .pixi/
 pixi.lock
-checkpoints/
+
+# Python
 __pycache__/
 *.pyc
-*.so
-.DS_Store
+*.pyo
+*.egg-info/
+*.egg
+
+# Training artifacts
+runs/
+checkpoints/
 *.pth
+*.pt
 *.onnx
+
+# Data
 data/datasets/
+data/raw_videos/
 *.mp4
 *.mkv
 *.avi
 *.mov
+
+# Logs / metrics
+*.log
 wandb/
 lightning_logs/
 output/
-.playwright-mcp/
+
+# Editors
 .vscode/
-*.log
-!examples/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Lint / type check
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+
+# Misc temp
+tmp/
+temp/
+.playwright-mcp/

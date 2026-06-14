@@ -18,7 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lpips import LPIPS
 
 from models.av1_vsr import AV1VSR
+from utils.console import console
 from utils.metrics import calculate_psnr_batch, calculate_ssim_batch
+from rich.table import Table
 
 
 def parse_args():
@@ -28,13 +30,13 @@ def parse_args():
     parser.add_argument('--config', type=str, default='configs/default.yaml')
     parser.add_argument('--crf', type=int, default=40)
     parser.add_argument('--preset', type=int, default=10)
-    parser.add_argument('--output', type=str, default='output/validate/validate_output.mp4')
+    parser.add_argument('--output', type=str, default='runs/validate/validate_output.mp4')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--max-frames', type=int, default=None)
     parser.add_argument('--warmup', type=int, default=1)
     parser.add_argument('--tile-size', type=int, default=256)
     parser.add_argument('--tile-overlap', type=int, default=32)
-    parser.add_argument('--scale', type=int, default=4)
+    parser.add_argument('--scale', type=int, default=1)
     parser.add_argument('--skip-vmaf', action='store_true', help='Skip VMAF computation')
     return parser.parse_args()
 
@@ -139,20 +141,20 @@ def main():
     cap.release()
 
     video_name = Path(args.video).stem
-    cache_root = Path('output/validate/cache') / f'{video_name}_{orig_w}x{orig_h}'
+    cache_root = Path('runs/validate/cache') / f'{video_name}_{orig_w}x{orig_h}'
     variant_dir = cache_root / f'svt_crf{args.crf}_p{args.preset}'
     hr_dir = cache_root / 'hr'
     lr_dir = variant_dir / 'lr_frames'
     lr_video = variant_dir / 'lr.mp4'
 
-    print(f'Original: {orig_w}x{orig_h} @ {fps:.0f}fps, {n_frames} frames')
-    print(f'AV1 encode: CRF {args.crf}, preset {args.preset}, scale {args.scale}')
-    print(f'Cache: {cache_root}')
+    console.print(f'Original: {orig_w}x{orig_h} @ {fps:.0f}fps, {n_frames} frames')
+    console.print(f'AV1 encode: CRF {args.crf}, preset {args.preset}, scale {args.scale}')
+    console.print(f'Cache: {cache_root}')
 
-    print('Step 1: Extracting HR frames...')
+    console.print('Step 1: Extracting HR frames...')
     hr_files = sorted(hr_dir.glob('*.png'))
     if len(hr_files) >= n_frames:
-        print(f'  cached: {len(hr_files)} frames')
+        console.print(f'  cached: {len(hr_files)} frames')
     else:
         shutil.rmtree(hr_dir, ignore_errors=True)
         hr_dir.mkdir(parents=True, exist_ok=True)
@@ -163,21 +165,21 @@ def main():
         ], check=True, capture_output=True)
         hr_files = sorted(hr_dir.glob('*.png'))
 
-    print('Step 2: Bicubic down + AV1 encoding...')
+    console.print('Step 2: Bicubic down + AV1 encoding...')
     if lr_video.exists():
-        print(f'  cached: {lr_video.name}')
+        console.print(f'  cached: {lr_video.name}')
         encode_time = 0
     else:
         variant_dir.mkdir(parents=True, exist_ok=True)
         t0 = time.perf_counter()
         encode_av1(hr_dir, lr_video, args.crf, args.preset, int(fps), args.scale)
         encode_time = time.perf_counter() - t0
-        print(f'  encode: {encode_time:.1f}s')
+        console.print(f'  encode: {encode_time:.1f}s')
 
-    print('Step 3: Decoding LR frames...')
+    console.print('Step 3: Decoding LR frames...')
     lr_files = sorted(lr_dir.glob('*.png'))
     if len(lr_files) >= n_frames:
-        print(f'  cached: {len(lr_files)} frames')
+        console.print(f'  cached: {len(lr_files)} frames')
     else:
         shutil.rmtree(lr_dir, ignore_errors=True)
         lr_dir.mkdir(parents=True, exist_ok=True)
@@ -186,7 +188,7 @@ def main():
             '-q:v', '2', '-y', str(lr_dir / 'frame_%06d.png'),
         ], check=True, capture_output=True)
         lr_files = sorted(lr_dir.glob('*.png'))
-        print(f'  decoded: {len(lr_files)} frames')
+        console.print(f'  decoded: {len(lr_files)} frames')
 
     out_w, out_h = orig_w * args.scale, orig_h * args.scale
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -198,14 +200,17 @@ def main():
     psnrs, ssims, lpipss = [], [], []
     warmup = args.warmup
 
-    print('Step 4: Model inference...')
+    console.print('Step 4: Model inference...')
     for i in range(min(len(lr_files), len(hr_files))):
-        lr = cv2.cvtColor(cv2.imread(str(lr_files[i]), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
-        hr_src = cv2.cvtColor(cv2.imread(str(hr_files[i]), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+        lr_rgb = cv2.cvtColor(cv2.imread(str(lr_files[i]), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+        hr_rgb = cv2.cvtColor(cv2.imread(str(hr_files[i]), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
 
-        lr_t = torch.from_numpy(lr).float().permute(2, 0, 1).unsqueeze(0) / 127.5 - 1.0
+        lr_yuv = cv2.cvtColor(lr_rgb, cv2.COLOR_RGB2YUV)
+        hr_yuv = cv2.cvtColor(hr_rgb, cv2.COLOR_RGB2YUV)
+
+        lr_t = torch.from_numpy(lr_yuv).float().permute(2, 0, 1).unsqueeze(0) / 127.5 - 1.0
         frames_lr.append(lr_t)
-        frames_hr.append(torch.from_numpy(hr_src).float().permute(2, 0, 1) / 127.5 - 1.0)
+        frames_hr.append(torch.from_numpy(hr_yuv).float().permute(2, 0, 1) / 127.5 - 1.0)
 
         if len(frames_lr) < 3:
             continue
@@ -224,22 +229,33 @@ def main():
         torch.cuda.synchronize()
         times.append((time.perf_counter() - t0) * 1000)
 
-        # ── Metrics on GPU ──
+        # ── YUV→RGB for metrics & output ──
+        def _yuv_to_rgb(x):
+            y = (x[:, 0:1] + 1) * 127.5
+            u = (x[:, 1:2] + 1) * 127.5 - 128.0
+            v = (x[:, 2:3] + 1) * 127.5 - 128.0
+            r = y + 1.402 * v
+            g = y - 0.344 * u - 0.714 * v
+            b = y + 1.772 * u
+            return torch.cat([r, g, b], dim=1) / 127.5 - 1.0
+
         hr_ref = frames_hr[i].unsqueeze(0).to(device)
         if pred.shape[-2:] != hr_ref.shape[-2:]:
             hr_ref = torch.nn.functional.interpolate(hr_ref, size=pred.shape[-2:], mode='bicubic')
 
-        psnr_val = calculate_psnr_batch(pred, hr_ref).item()
-        ssim_val = calculate_ssim_batch(pred, hr_ref).item()
-        lpips_val = lpips_fn(pred, hr_ref).item()
+        pred_rgb = _yuv_to_rgb(pred)
+        hr_rgb = _yuv_to_rgb(hr_ref)
+
+        psnr_val = calculate_psnr_batch(pred_rgb, hr_rgb).item()
+        ssim_val = calculate_ssim_batch(pred_rgb, hr_rgb).item()
+        lpips_val = lpips_fn(pred_rgb, hr_rgb).item()
 
         psnrs.append(psnr_val)
         ssims.append(ssim_val)
         lpipss.append(lpips_val)
 
         # ── Save frame ──
-        pred = pred.squeeze(0).cpu()
-        pred_np = pred.permute(1, 2, 0).numpy()
+        pred_np = pred_rgb.squeeze(0).permute(1, 2, 0).cpu().numpy()
         pred_np = np.clip((pred_np + 1) * 127.5, 0, 255).astype(np.uint8)
         writer.write(cv2.cvtColor(pred_np, cv2.COLOR_RGB2BGR))
 
@@ -255,7 +271,7 @@ def main():
             has_libvmaf = False
 
         if has_libvmaf:
-            print('Step 5: Computing VMAF...')
+            console.print('Step 5: Computing VMAF...')
             hr_pattern = str(hr_dir / 'frame_%06d.png')
             vmaf_log = Path(args.output).with_suffix('.vmaf.json')
             vmaf_cmd = [
@@ -277,24 +293,24 @@ def main():
             except Exception:
                 pass
 
-    print()
-    print('═══ Validation Report ═══')
-    print(f'  Resolution:   {orig_w}x{orig_h} (x{args.scale} via AV1 CRF{args.crf} p{args.preset})')
-    print(f'  Model params: {sum(p.numel() for p in model.parameters()):,}')
-    print(f'  ---- Timing ----')
-    print(f'  Avg latency:  {np.mean(times):.0f} ms/frame')
-    print(f'  FPS:          {1000/np.mean(times):.1f}')
-    print(f'  ---- Quality ----')
-    print(f'  PSNR:         {np.mean(psnrs):.3f}')
-    print(f'  SSIM:         {np.mean(ssims):.4f}')
-    print(f'  LPIPS:        {np.mean(lpipss):.4f}')
+    table = Table(title="Validation Report")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Resolution", f"{orig_w}x{orig_h} (x{args.scale} via AV1 CRF{args.crf} p{args.preset})")
+    table.add_row("Model params", f"{sum(p.numel() for p in model.parameters()):,}")
+    table.add_row("Avg latency", f"{np.mean(times):.0f} ms/frame")
+    table.add_row("FPS", f"{1000/np.mean(times):.1f}")
+    table.add_row("PSNR", f"{np.mean(psnrs):.3f}")
+    table.add_row("SSIM", f"{np.mean(ssims):.4f}")
+    table.add_row("LPIPS", f"{np.mean(lpipss):.4f}")
     if vmaf_score is not None:
-        print(f'  VMAF:         {vmaf_score:.2f}')
+        table.add_row("VMAF", f"{vmaf_score:.2f}")
     else:
-        print(f'  VMAF:         not available (ffmpeg lacks libvmaf)')
-    print(f'  Frames:       {len(times)}')
-
-    print(f'\nOutput video: {args.output}')
+        table.add_row("VMAF", "not available")
+    table.add_row("Frames", str(len(times)))
+    console.print()
+    console.print(table)
+    console.print(f'Output video: {args.output}')
 
 
 if __name__ == '__main__':

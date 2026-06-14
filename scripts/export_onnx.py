@@ -1,3 +1,4 @@
+import argparse
 import sys
 import yaml
 import torch
@@ -13,11 +14,19 @@ class ONNXWrapper(torch.nn.Module):
         self.model = model
 
     def forward(self, prev, cur, next_):
-        return self.model(prev, cur, next_, scale=4)
+        return self.model(prev, cur, next_, scale=1)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--checkpoint', type=str, default='runs/test/best.pth')
+    parser.add_argument('--output', type=str, default='runs/model.onnx')
+    return parser.parse_args()
 
 
 def main():
-    config = yaml.safe_load(open('configs/test_full.yaml'))
+    args = parse_args()
+    config = yaml.safe_load(open('configs/test.yaml'))
     device = 'cuda'
 
     model = AV1VSR(
@@ -27,7 +36,7 @@ def main():
         scales=config['model']['scales'],
     ).to(device)
 
-    ckpt = torch.load('checkpoints/best.pth', map_location=device)
+    ckpt = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(ckpt['model_state_dict'])
     model.eval()
 
@@ -41,7 +50,7 @@ def main():
     torch.onnx.export(
         wrapper,
         (prev, cur, next_),
-        'checkpoints/model.onnx',
+        args.output,
         input_names=['prev', 'cur', 'next'],
         output_names=['output'],
         dynamic_axes={
@@ -52,7 +61,7 @@ def main():
         },
         opset_version=17,
     )
-    print('Exported: checkpoints/model.onnx')
+    print(f'Exported: {args.output}')
 
 
 if __name__ == '__main__':

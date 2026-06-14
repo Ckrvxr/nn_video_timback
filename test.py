@@ -41,9 +41,9 @@ def main():
     print(f'Loaded checkpoint from epoch {ckpt.get("epoch", "?")}')
 
     test_loader = create_dataloader(
-        root=config['data']['root'],
+        datasets=config['data']['datasets'],
         batch_size=1,
-        scales=[1, 2, 3, 4],
+        scales=[1, 2, 4],
         patch_size=config['data']['patch_size'],
         frames=config['data']['frames'],
         workers=2,

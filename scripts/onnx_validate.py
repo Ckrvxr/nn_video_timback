@@ -11,10 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 def main():
     video = 'data/validate/16079851_3840_2160_30fps.mp4'
-    cache_root = Path('output/validate/cache/16079851_3840_2160_30fps_3840x2160')
+    cache_root = Path('runs/validate/cache/16079851_3840_2160_30fps_3840x2160')
     hr_dir = cache_root / 'hr'
     lr_dir = cache_root / 'svt_crf40_p10' / 'lr_frames'
-    output_path = 'output/validate/16079851_onnx.mp4'
+    output_path = 'runs/validate/16079851_onnx.mp4'
 
     hr_files = sorted(hr_dir.glob('*.png'))
     lr_files = sorted(lr_dir.glob('*.png'))
@@ -39,7 +39,7 @@ def main():
         }),
         'CPUExecutionProvider',
     ]
-    session = ort.InferenceSession('checkpoints/model.onnx', sess_options=so, providers=providers)
+    session = ort.InferenceSession('runs/model.onnx', sess_options=so, providers=providers)
     input_names = [i.name for i in session.get_inputs()]
     output_name = session.get_outputs()[0].name
 

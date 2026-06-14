@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from models.av1_vsr import AV1VSR
 
@@ -18,7 +18,7 @@ def parse_args():
     parser.add_argument('--checkpoint', type=str, required=True)
     parser.add_argument('--input', type=str, required=True, help='Input video path')
     parser.add_argument('--output', type=str, required=True, help='Output video path')
-    parser.add_argument('--scale', type=int, default=4, choices=[1, 2, 3, 4, 5, 6])
+    parser.add_argument('--scale', type=int, default=1, choices=[1, 2, 4])
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--tile', type=int, default=0, help='Tile size for large frames (0=disable)')
     return parser.parse_args()

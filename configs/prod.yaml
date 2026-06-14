@@ -1,22 +1,22 @@
 ---
 project_name: av1_vsr
-output_dir: checkpoints/prod
+output_dir: runs/prod
 seed: 42
 
 data:
-  root: ./data/datasets
+  datasets: [./data/datasets/realisvideo-4k, ./data/datasets/test_clip]
   patch_size: 256
   frames: 5
   val_batch_size: 16
   workers: 0
   data_type: compressed
-  scales: [1, 2, 3, 4]
+  scales: [1]
 
 model:
-  n_features: 32
-  n_blocks: 4
-  n_fusion_heads: 1
-  scales: [1, 2, 3, 4, 5, 6]
+  name: hyper_fixer
+  n_features: 48
+  n_blocks: 2
+  latent: 512
 
 training:
   batch_size: 32

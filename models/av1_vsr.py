@@ -16,7 +16,7 @@ class AV1VSR(nn.Module):
         scales: list[int] = None,
     ):
         super().__init__()
-        scales = scales or [1, 2, 3, 4, 5, 6]
+        scales = scales or [1, 2, 4]
 
         self.conv_first = nn.Sequential(
             nn.Conv2d(in_channels, n_features, 3, padding=1, bias=False),
@@ -37,7 +37,7 @@ class AV1VSR(nn.Module):
 
     def forward(
         self, frame_prev: torch.Tensor, frame_cur: torch.Tensor,
-        frame_next: torch.Tensor, scale: int = 4
+        frame_next: torch.Tensor, scale: int = 1
     ) -> torch.Tensor:
         scale = int(scale)
 

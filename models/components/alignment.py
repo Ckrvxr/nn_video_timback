@@ -30,7 +30,7 @@ class SimpleWarpAlign(nn.Module):
             torch.arange(w, device=feat.device, dtype=torch.float32),
             indexing='ij',
         )
-        grid = torch.empty(n, h, w, 2, device=feat.device, dtype=torch.float32)
+        grid = torch.empty(n, h, w, 2, device=feat.device, dtype=feat.dtype)
         grid[..., 0] = 2.0 * (grid_x + flow[:, 0]) / (w - 1) - 1.0
         grid[..., 1] = 2.0 * (grid_y + flow[:, 1]) / (h - 1) - 1.0
         return F.grid_sample(feat, grid, mode='bilinear', padding_mode='border', align_corners=True)

@@ -7,107 +7,100 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, BatchSampler
 
-
-_global_cache: dict | None = None
-
-
-def _load_all_frames(root: Path) -> dict:
-    cache = {'hr': {}, 'lr': {}}
-    hr_dir = root / 'HR'
-
-    for video_dir in sorted(hr_dir.iterdir()):
-        if not video_dir.is_dir():
-            continue
-        frames = []
-        for p in sorted(video_dir.glob('*.png')):
-            img = cv2.imread(str(p), cv2.IMREAD_COLOR)
-            frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-        cache['hr'][video_dir.name] = frames
-
-    for vd in sorted(root.iterdir()):
-        if not vd.is_dir() or vd.name == 'HR':
-            continue
-        cache['lr'][vd.name] = {}
-        for video_dir in sorted(vd.iterdir()):
-            if not video_dir.is_dir():
-                continue
-            frames = []
-            for p in sorted(video_dir.glob('*.png')):
-                img = cv2.imread(str(p), cv2.IMREAD_COLOR)
-                frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-            cache['lr'][vd.name][video_dir.name] = frames
-
-    return cache
-
-
-def _ensure_cache(root: Path):
-    global _global_cache
-    if _global_cache is not None:
-        return
-    _global_cache = _load_all_frames(root)
+from .video_loader import probe_frame_count
+from .frame_cache import FrameCache
 
 
 class AV1CompressedVideoDataset(Dataset):
     def __init__(
         self,
-        root: str,
+        datasets: list[str],
         scales: list[int] = None,
         patch_size: int = 256,
         frames: int = 3,
         is_train: bool = True,
+        enable_cache: bool = True,
     ):
-        self.root = Path(root)
-        self.scales = scales or [1, 2, 3, 4, 5, 6]
+        self.datasets = [Path(d) for d in datasets]
+        self.scales = scales or [1, 2, 4]
         self.patch_size = patch_size
         self.frames = frames
         self.is_train = is_train
-        self.hr_dir = self.root / 'HR'
-        self.variant_dirs = sorted([
-            d for d in self.root.iterdir()
-            if d.is_dir() and d.name != 'HR'
-        ])
-        self.samples = self._scan()
+        self.enable_cache = enable_cache
+        self.videos = self._build_inventory()
 
-    def _get_scale(self, idx: int) -> int:
-        n = len(self.samples)
-        if self.is_train and n > 0 and idx >= n:
-            s = idx // n
-            if s in self.scales:
-                return s
-        return random.choice(self.scales) if self.is_train else 4
+        self._cache_key = None
+        self._hr_cache = []
+        self._lr_cache = []
 
-    def _scan(self) -> list[dict]:
-        samples = []
-        for video in sorted(self.hr_dir.iterdir()):
-            if not video.is_dir():
-                continue
-            hr_frames = sorted(video.glob('*.png'))
-            n_frames = len(hr_frames)
+        if not is_train:
+            self._val_plan = self._build_val_plan()
 
-            variant_names = []
-            for vd in self.variant_dirs:
-                lr_dir = vd / video.name
-                if not lr_dir.exists():
+    @staticmethod
+    def _list_video_names(hr_dir: Path) -> list[str]:
+        return sorted(f.stem for f in hr_dir.glob('*.mp4'))
+
+    @staticmethod
+    def _get_n_frames(hr_dir: Path, video_name: str) -> int:
+        return probe_frame_count(str(hr_dir / f'{video_name}.mp4'))
+
+    @staticmethod
+    def _variant_has(variant_dir: Path, video_name: str) -> bool:
+        return (variant_dir / f'{video_name}.mp4').exists()
+
+    @staticmethod
+    def _variant_n_frames(variant_dir: Path, video_name: str) -> int:
+        return probe_frame_count(str(variant_dir / f'{video_name}.mp4'))
+
+    @staticmethod
+    def _load_any_format(dir_path: Path, video_name: str) -> list[np.ndarray]:
+        from .video_loader import load_video_frames
+        return load_video_frames(str(dir_path / f'{video_name}.mp4'))
+
+    def _build_inventory(self) -> list[dict]:
+        videos = []
+        for ds_root in self.datasets:
+            hr_dir = ds_root / 'HR'
+            variant_dirs = sorted(d for d in ds_root.iterdir()
+                                  if d.is_dir() and d.name != 'HR')
+            for name in self._list_video_names(hr_dir):
+                n = self._get_n_frames(hr_dir, name)
+                if n == 0:
                     continue
-                lr_files = sorted(lr_dir.glob('*.png'))
-                if len(lr_files) != n_frames:
-                    continue
-                variant_names.append(vd.name)
+                variants = []
+                for vd in variant_dirs:
+                    if self._variant_has(vd, name) and self._variant_n_frames(vd, name) == n:
+                        variants.append(vd.name)
+                if variants:
+                    videos.append({'name': name, 'n_frames': n,
+                                   'variants': variants, 'ds_root': ds_root})
+        return videos
 
-            if not variant_names:
-                continue
+    def _build_val_plan(self) -> list[dict]:
+        return [{'video': v['name'], 'variant': v['variants'][0],
+                 'frame': v['n_frames'] // 2, 'ds_root': v['ds_root']}
+                for v in self.videos]
 
-            for i in range(n_frames):
-                samples.append({
-                    'video_name': video.name,
-                    'variant_names': variant_names,
-                    'center_idx': i,
-                    'n_frames': n_frames,
-                })
-        return samples
+    def load_video(self, video_name: str, variant_name: str, ds_root: Path):
+        key = (video_name, variant_name, ds_root)
+        if self._cache_key == key:
+            return
+
+        if self.enable_cache:
+            FrameCache().set_cache_root(ds_root / 'cache')
+
+        hr_path = ds_root / 'HR' / f'{video_name}.mp4'
+        lr_path = ds_root / variant_name / f'{video_name}.mp4'
+        if not hr_path.exists():
+            raise FileNotFoundError(f'HR video not found: {hr_path}')
+        if not lr_path.exists():
+            raise FileNotFoundError(f'LR video not found: {lr_path}')
+
+        self._hr_cache, self._lr_cache = FrameCache().get_or_load(hr_path, lr_path)
+        self._cache_key = key
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return sum(max(0, v['n_frames'] - self.frames + 1) for v in self.videos)
 
     def _safe_crop(self, img: np.ndarray, y: int, x: int, size: int) -> np.ndarray:
         h, w = img.shape[:2]
@@ -122,40 +115,35 @@ class AV1CompressedVideoDataset(Dataset):
         if self.is_train:
             crop_size = (self.patch_size // scale) * scale
         else:
-            crop_size = min(h, w) if self.patch_size is None else self.patch_size
+            crop_size = min(h, w)
             crop_size = (crop_size // scale) * scale
-        lr_h = crop_size // scale
-        lr_w = crop_size // scale
         if self.is_train:
             y = random.randint(0, max(0, h - crop_size))
             x = random.randint(0, max(0, w - crop_size))
         else:
             y = max(0, (h - crop_size) // 2)
             x = max(0, (w - crop_size) // 2)
-        return y, x, crop_size, lr_h, lr_w
+        return y, x, crop_size
 
-    def __getitem__(self, idx: int) -> dict:
-        _ensure_cache(self.root)
-        cache = _global_cache
+    def __getitem__(self, item) -> dict:
+        if isinstance(item, tuple):
+            video_name, variant_name, center_frame, scale, ds_root = item
+        else:
+            plan = self._val_plan[item % len(self._val_plan)]
+            video_name, variant_name, center_frame, scale, ds_root = (
+                plan['video'], plan['variant'], plan['frame'], 4, plan['ds_root'])
 
-        scale = self._get_scale(idx)
-        idx = idx % len(self.samples)
-        sample = self.samples[idx]
-        center = sample['center_idx']
+        self.load_video(video_name, variant_name, ds_root)
+
         half = self.frames // 2
-        video_name = sample['video_name']
-        variant_name = random.choice(sample['variant_names'])
-
-        center_hr = cache['hr'][video_name][center]
+        center_hr = self._hr_cache[center_frame]
         h, w = center_hr.shape[:2]
-        crop_y, crop_x, crop_size, lr_h, lr_w = self._get_crop_params(h, w, scale)
+        crop_y, crop_x, crop_size = self._get_crop_params(h, w, scale)
 
         lr_frames = []
-        for i in range(center - half, center + half + 1):
-            i_clamped = max(0, min(i, sample['n_frames'] - 1))
-            lr = cache['lr'][variant_name][video_name][i_clamped]
-            lr_crop = self._safe_crop(lr, crop_y, crop_x, crop_size)
-            lr = cv2.resize(lr_crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
+        for i in range(center_frame - half, center_frame + half + 1):
+            i_clamped = max(0, min(i, len(self._hr_cache) - 1))
+            lr = self._safe_crop(self._lr_cache[i_clamped], crop_y, crop_x, crop_size)
             lr_frames.append(lr)
 
         hr_patch = self._safe_crop(center_hr, crop_y, crop_x, crop_size)
@@ -167,47 +155,50 @@ class AV1CompressedVideoDataset(Dataset):
 
 
 class CleanVSRDataset(AV1CompressedVideoDataset):
-    def _get_scale(self, idx: int) -> int:
-        return super()._get_scale(idx)
+    def load_video(self, video_name: str, variant_name: str = None, ds_root: Path = None):
+        key = (video_name, ds_root)
+        if self._cache_key == key:
+            return
 
-    def _scan(self) -> list[dict]:
-        samples = []
-        for video in sorted(self.hr_dir.iterdir()):
-            if not video.is_dir():
-                continue
-            hr_frames = sorted(video.glob('*.png'))
-            n_frames = len(hr_frames)
-            for i in range(n_frames):
-                samples.append({
-                    'video_name': video.name,
-                    'center_idx': i,
-                    'n_frames': n_frames,
-                })
-        return samples
+        if self.enable_cache:
+            FrameCache().set_cache_root(ds_root / 'cache')
 
-    def __getitem__(self, idx: int) -> dict:
-        _ensure_cache(self.root)
-        cache = _global_cache
+        hr_path = ds_root / 'HR' / f'{video_name}.mp4'
+        self._hr_cache, self._lr_cache = FrameCache().get_or_load(hr_path, hr_path)
+        self._cache_key = key
 
-        scale = self._get_scale(idx)
-        idx = idx % len(self.samples)
-        sample = self.samples[idx]
-        center = sample['center_idx']
+    def _build_inventory(self) -> list[dict]:
+        videos = []
+        for ds_root in self.datasets:
+            hr_dir = ds_root / 'HR'
+            for name in self._list_video_names(hr_dir):
+                n = self._get_n_frames(hr_dir, name)
+                if n > 0:
+                    videos.append({'name': name, 'n_frames': n,
+                                   'variants': ['clean'], 'ds_root': ds_root})
+        return videos
+
+    def __getitem__(self, item) -> dict:
+        if isinstance(item, tuple):
+            video_name, _, center_frame, scale, ds_root = item
+        else:
+            plan = self._val_plan[item % len(self._val_plan)]
+            video_name, center_frame, scale, ds_root = (
+                plan['video'], plan['frame'], 4, plan['ds_root'])
+
+        self.load_video(video_name, ds_root=ds_root)
+
         half = self.frames // 2
-        video_name = sample['video_name']
-        n_frames = sample['n_frames']
-
-        center_hr = cache['hr'][video_name][center]
+        center_hr = self._hr_cache[center_frame]
         h, w = center_hr.shape[:2]
-        crop_y, crop_x, crop_size, lr_h, lr_w = self._get_crop_params(h, w, scale)
+        crop_y, crop_x, crop_size = self._get_crop_params(h, w, scale)
 
         lr_frames = []
-        for i in range(center - half, center + half + 1):
-            i_clamped = max(0, min(i, n_frames - 1))
-            hr = cache['hr'][video_name][i_clamped]
+        for i in range(center_frame - half, center_frame + half + 1):
+            i_clamped = max(0, min(i, len(self._hr_cache) - 1))
+            hr = self._hr_cache[i_clamped]
             hr_crop = self._safe_crop(hr, crop_y, crop_x, crop_size)
-            lr = cv2.resize(hr_crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
-            lr_frames.append(lr)
+            lr_frames.append(hr_crop)
 
         hr_patch = self._safe_crop(center_hr, crop_y, crop_x, crop_size)
 
@@ -217,26 +208,35 @@ class CleanVSRDataset(AV1CompressedVideoDataset):
         return {'lr_frames': lr_t, 'hr': hr_t, 'scale': scale}
 
 
-class RandomScaleBatchSampler(BatchSampler):
-    """Yields batches where all items share the same scale.
-    Encodes scale in high bits of each index so __getitem__ can decode it."""
+class VideoBatchSampler(BatchSampler):
+    """Yields batches where all items share one video + variant.
+    This lets __getitem__ load only one video per batch (~1.1 GB peak)."""
     def __init__(self, dataset, batch_size):
         self.dataset = dataset
         self.batch_size = batch_size
-        self.n = len(dataset)
 
     def __iter__(self):
-        indices = list(range(self.n))
-        random.shuffle(indices)
-        for i in range(0, self.n, self.batch_size):
-            scale = random.choice(self.dataset.scales)
-            offset = scale * self.n
-            batch = [idx + offset for idx in indices[i:i + self.batch_size]]
-            if len(batch) == self.batch_size:
-                yield batch
+        videos = list(self.dataset.videos)
+        random.shuffle(videos)
+        half = self.dataset.frames // 2
+
+        for v in videos:
+            variant = random.choice(v['variants'])
+            valid_end = v['n_frames'] - half
+            if valid_end <= half:
+                continue
+            pool = list(range(half, valid_end))
+            random.shuffle(pool)
+            for i in range(0, len(pool), self.batch_size):
+                chunk = pool[i:i + self.batch_size]
+                if len(chunk) < self.batch_size:
+                    continue
+                scale = random.choice(self.dataset.scales)
+                yield [(v['name'], variant, f, scale, v['ds_root']) for f in chunk]
 
     def __len__(self):
-        return self.n // self.batch_size
+        total = sum(max(0, v['n_frames'] - self.dataset.frames + 1) for v in self.dataset.videos)
+        return max(1, total // self.batch_size)
 
 
 def collate_vsr(batch: list[dict]) -> dict[str, Any]:
@@ -252,7 +252,7 @@ def collate_vsr(batch: list[dict]) -> dict[str, Any]:
 
 
 def create_dataloader(
-    root: str,
+    datasets: list[str],
     batch_size: int = 16,
     scales: list[int] = None,
     patch_size: int = 256,
@@ -260,14 +260,16 @@ def create_dataloader(
     workers: int = 8,
     is_train: bool = True,
     data_type: str = 'compressed',
-) -> DataLoader:
+    enable_cache: bool = True,
+) -> DataLoader | AV1CompressedVideoDataset:
     cls = AV1CompressedVideoDataset if data_type == 'compressed' else CleanVSRDataset
     dataset = cls(
-        root=root,
+        datasets=datasets,
         scales=scales,
         patch_size=patch_size,
         frames=frames,
         is_train=is_train,
+        enable_cache=enable_cache,
     )
 
     kwargs = {
@@ -276,8 +278,9 @@ def create_dataloader(
         'persistent_workers': workers > 0,
         'prefetch_factor': 2 if workers > 0 else None,
     }
+
     if is_train and batch_size > 1:
-        sampler = RandomScaleBatchSampler(dataset, batch_size)
+        sampler = VideoBatchSampler(dataset, batch_size)
         return DataLoader(
             dataset,
             batch_sampler=sampler,
@@ -285,11 +288,5 @@ def create_dataloader(
             **kwargs,
         )
 
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=is_train,
-        drop_last=is_train,
-        collate_fn=collate_vsr if batch_size > 1 else None,
-        **kwargs,
-    )
+    # Validation: return dataset directly (manual loop in validate())
+    return dataset
