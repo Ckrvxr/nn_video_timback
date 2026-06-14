@@ -105,11 +105,12 @@ def main():
             t.add_column('Comp', justify='right')
             t.add_column('Ratio', justify='right')
             t.add_column('Disk', justify='right')
+            t.add_column('ETA', justify='right')
             for entry in recent:
                 fname, raw_b, comp_b, _, _, _, _, cumul = entry
                 r = raw_b / comp_b if comp_b else 0
                 t.add_row(f'{fname}', f'{raw_b/1e6:.0f}M', f'{comp_b/1e6:.0f}M',
-                          f'{r:.1f}x', f'{cumul/1e9:.1f}G')
+                          f'{r:.1f}x', f'{cumul/1e9:.1f}G', '')
             return t
 
         def update():
@@ -121,15 +122,20 @@ def main():
             t = build_table()
             if done == n_total:
                 est = gb
+                eta_str = ''
             elif done:
                 est = gb / done * n_total
+                eta_sec = (n_total - done) / rate if rate else 0
+                eta_str = fmt_time(eta_sec)
             else:
                 est = 0
-            t.add_row('[dim]──[/]'*4)
+                eta_str = ''
+            t.add_row('[dim]──[/]'*5)
             r = total_raw / total_bytes if total_bytes else 0
             t.add_row(f'[bold]{done}/{n_total}[/]',
                       f'[bold]{total_raw/1e6:.0f}M[/]', f'[bold]{total_bytes/1e6:.0f}M[/]',
-                      f'[bold]{r:.1f}x[/]', f'[bold]~{est:.0f}G[/]')
+                      f'[bold]{r:.1f}x[/]', f'[bold]~{est:.0f}G[/]',
+                      f'{eta_str}')
             return t
 
         def report(path, status, n, comp_b, raw_b):
