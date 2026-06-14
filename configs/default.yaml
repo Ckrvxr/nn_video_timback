@@ -7,7 +7,7 @@ data:
   datasets: [./data/datasets/realisvideo-4k, ./data/datasets/test_clip]
   patch_size: 256
   frames: 5
-  workers: 8
+  workers: 2
   data_type: compressed
   scales: [1]
 
