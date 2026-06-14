@@ -9,7 +9,7 @@ data:
   frames: 5
   workers: 2
   data_type: compressed
-  scales: [1]
+
 
 model:
   name: hyper_fixer

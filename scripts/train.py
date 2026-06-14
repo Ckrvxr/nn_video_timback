@@ -75,25 +75,14 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
         task = progress.add_task("Training", total=n_batches)
 
         for batch_idx, batch in enumerate(loader):
-            lr_raw = batch['lr_frames'].to(device, non_blocking=True)
+            lr = batch['lr_frames'].to(device, non_blocking=True)
             hr = batch['hr'].to(device, non_blocking=True)
-            scale = batch['scale']
-
-            B, T, C, H, W = lr_raw.shape
-            if scale > 1:
-                lr_frames = F.interpolate(
-                    lr_raw.view(B * T, C, H, W),
-                    size=(H // scale, W // scale),
-                    mode='bilinear', align_corners=False,
-                ).view(B, T, C, H // scale, W // scale)
-            else:
-                lr_frames = lr_raw
 
             optimizer.zero_grad()
 
             with torch.amp.autocast(device_type='cuda', enabled=scaler is not None):
-                pred_cur = model(lr_frames[:, 1], lr_frames[:, 2], lr_frames[:, 3], scale=scale)
-                pred_next = model(lr_frames[:, 2], lr_frames[:, 3], lr_frames[:, 4], scale=scale) if has_temp else None
+                pred_cur = model(lr[:, 1], lr[:, 2], lr[:, 3])
+                pred_next = model(lr[:, 2], lr[:, 3], lr[:, 4]) if has_temp else None
                 loss_dict = criterion(pred_cur, hr, pred_next=pred_next)
 
             if scaler is not None:
@@ -132,7 +121,6 @@ def validate(model, dataset, device, max_samples=100):
     total_ssim = 0.0
     n = 0
     half = dataset.frames // 2
-    scale = 1
 
     for v in dataset.videos:
         variant = v['variants'][0]
@@ -147,7 +135,7 @@ def validate(model, dataset, device, max_samples=100):
 
             center_hr = hr_cache[center]
             h, w = center_hr.shape[:2]
-            crop_y, crop_x, crop_size = dataset._get_crop_params(h, w, scale)
+            crop_y, crop_x, crop_size = dataset._get_crop_params(h, w)
 
             lr_patches = []
             for i in range(center - half, center + half + 1):
@@ -166,7 +154,6 @@ def validate(model, dataset, device, max_samples=100):
                 lr_t[:, 1],
                 lr_t[:, 2],
                 lr_t[:, 3],
-                scale=scale,
             )
 
             pred_rgb = _yuv_to_rgb(pred)
@@ -236,12 +223,10 @@ def main():
         console.print(f'Resumed from epoch {start_epoch}')
 
     data_type = config['data'].get('data_type', 'compressed')
-    model_scales = config['data'].get('scales', [1]) if model_name == 'hyper_fixer' else config['data'].get('scales', [1, 2, 4])
 
     train_loader = create_dataloader(
         datasets=config['data']['datasets'],
         batch_size=train_cfg['batch_size'],
-        scales=model_scales,
         patch_size=config['data']['patch_size'],
         frames=config['data']['frames'],
         workers=config['data'].get('workers', 4),
@@ -249,14 +234,14 @@ def main():
         data_type=data_type,
     )
 
-    if args.limit > 0:
-        train_loader.dataset.videos = train_loader.dataset.videos[:args.limit]
+    limit = args.limit or config['data'].get('limit', 0)
+    if limit > 0:
+        train_loader.dataset.videos = train_loader.dataset.videos[:limit]
         console.print(f'[yellow]Limited to {len(train_loader.dataset.videos)} videos[/]')
 
     val_dataset = create_dataloader(
         datasets=config['data']['datasets'],
         batch_size=config['data'].get('val_batch_size', 16),
-        scales=[1],
         patch_size=config['data']['patch_size'],
         frames=config['data']['frames'],
         workers=0,

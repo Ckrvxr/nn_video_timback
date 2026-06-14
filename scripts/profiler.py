@@ -59,19 +59,15 @@ def build_model(config, device):
             in_channels=3,
             n_features=config['model']['n_features'],
             n_blocks=config['model']['n_blocks'],
-            scales=config['model'].get('scales', [1, 2, 4]),
         )
     return m.to(device)
 
 
 def make_loader(config, batch_size=None, workers=None, is_train=True):
     from utils.dataset import create_dataloader
-    model_name = config['model'].get('name', 'av1_vsr')
-    scales = config['data'].get('scales', [1]) if model_name == 'hyper_fixer' else config['data'].get('scales', [1, 2, 4])
     return create_dataloader(
         datasets=config['data']['datasets'],
         batch_size=batch_size or config['training']['batch_size'],
-        scales=scales,
         patch_size=config['data']['patch_size'],
         frames=config['data']['frames'],
         workers=workers if workers is not None else 0,

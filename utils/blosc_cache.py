@@ -43,6 +43,7 @@ class BloscCache:
         return out
 
     def put(self, video_path: str | Path, frames: list[np.ndarray]):
+        """Store YUV444 frames (H,W,3) → YUV420 planar → .blp."""
         cp = self.cache_path(video_path)
         cp.parent.mkdir(parents=True, exist_ok=True)
         h, w = frames[0].shape[:2]
@@ -56,6 +57,28 @@ class BloscCache:
             v = cv2.resize(f[:, :, 2], (w // 2, h // 2),
                            interpolation=self.uv_interp).ravel()
             rows.append(np.concatenate([y, u, v]))
+        arr = np.stack(rows, axis=0)
+        compressed = blosc.pack_array(
+            arr, cname=self.cname, clevel=self.clevel, shuffle=blosc.NOSHUFFLE)
+        with open(cp, 'wb') as f:
+            f.write(np.array([h, w], dtype=np.uint16).tobytes())
+            f.write(compressed)
+
+    def put_raw(self, video_path: str | Path, raw_frames: list[tuple[np.ndarray, np.ndarray, np.ndarray]]):
+        """Store native YUV420 planes directly — no YUV444 intermediate.
+
+        Each tuple is (Y_plane (H,W), U_plane (H/2,W/2), V_plane (H/2,W/2)).
+        Eliminates the up→down redundant cycle for U/V.
+        """
+        cp = self.cache_path(video_path)
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        h, w = raw_frames[0][0].shape[:2]
+        n = h * w
+        n_uv = (h // 2) * (w // 2)
+        rows = []
+        for y_plane, u_plane, v_plane in raw_frames:
+            rows.append(np.concatenate([
+                y_plane.ravel(), u_plane.ravel(), v_plane.ravel()]))
         arr = np.stack(rows, axis=0)
         compressed = blosc.pack_array(
             arr, cname=self.cname, clevel=self.clevel, shuffle=blosc.NOSHUFFLE)

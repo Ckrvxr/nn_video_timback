@@ -10,7 +10,7 @@ data:
   val_batch_size: 16
   workers: 0
   data_type: compressed
-  scales: [1]
+
 
 model:
   name: hyper_fixer

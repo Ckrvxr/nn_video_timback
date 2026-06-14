@@ -33,7 +33,7 @@ def main():
         in_channels=3,
         n_features=config['model']['n_features'],
         n_blocks=config['model']['n_blocks'],
-        scales=config['model']['scales'],
+
     ).to(device)
 
     ckpt = torch.load(args.checkpoint, map_location=device)

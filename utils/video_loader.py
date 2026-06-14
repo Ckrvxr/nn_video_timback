@@ -24,6 +24,23 @@ def load_video_frames(video_path: str) -> list[np.ndarray]:
     return frames
 
 
+def load_video_frames_raw(video_path: str) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Decode video into list of (Y_plane, U_plane, V_plane) tuples.
+
+    Each plane is uint8 with native YUV420 resolution:
+      Y: (H, W), U/V: (H/2, W/2).  No upsampling — lossless decode path.
+    """
+    out = []
+    with av.open(video_path) as container:
+        for frame in container.decode(video=0):
+            h, w = frame.height, frame.width
+            y = np.frombuffer(bytes(frame.planes[0]), dtype=np.uint8).reshape(h, w)
+            u = np.frombuffer(bytes(frame.planes[1]), dtype=np.uint8).reshape(h // 2, w // 2)
+            v = np.frombuffer(bytes(frame.planes[2]), dtype=np.uint8).reshape(h // 2, w // 2)
+            out.append((y, u, v))
+    return out
+
+
 def probe_frame_count(video_path: str) -> int:
     with av.open(video_path) as container:
         stream = container.streams.video[0]

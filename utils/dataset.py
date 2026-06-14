@@ -15,14 +15,12 @@ class AV1CompressedVideoDataset(Dataset):
     def __init__(
         self,
         datasets: list[str],
-        scales: list[int] = None,
         patch_size: int = 256,
         frames: int = 3,
         is_train: bool = True,
         enable_cache: bool = True,
     ):
         self.datasets = [Path(d) for d in datasets]
-        self.scales = scales or [1, 2, 4]
         self.patch_size = patch_size
         self.frames = frames
         self.is_train = is_train
@@ -111,12 +109,11 @@ class AV1CompressedVideoDataset(Dataset):
             crop = cv2.copyMakeBorder(crop, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT)
         return crop
 
-    def _get_crop_params(self, h: int, w: int, scale: int):
+    def _get_crop_params(self, h: int, w: int):
         if self.is_train:
-            crop_size = (self.patch_size // scale) * scale
+            crop_size = self.patch_size
         else:
             crop_size = min(h, w)
-            crop_size = (crop_size // scale) * scale
         if self.is_train:
             y = random.randint(0, max(0, h - crop_size))
             x = random.randint(0, max(0, w - crop_size))
@@ -127,18 +124,18 @@ class AV1CompressedVideoDataset(Dataset):
 
     def __getitem__(self, item) -> dict:
         if isinstance(item, tuple):
-            video_name, variant_name, center_frame, scale, ds_root = item
+            video_name, variant_name, center_frame, ds_root = item
         else:
             plan = self._val_plan[item % len(self._val_plan)]
-            video_name, variant_name, center_frame, scale, ds_root = (
-                plan['video'], plan['variant'], plan['frame'], 4, plan['ds_root'])
+            video_name, variant_name, center_frame, ds_root = (
+                plan['video'], plan['variant'], plan['frame'], plan['ds_root'])
 
         self.load_video(video_name, variant_name, ds_root)
 
         half = self.frames // 2
         center_hr = self._hr_cache[center_frame]
         h, w = center_hr.shape[:2]
-        crop_y, crop_x, crop_size = self._get_crop_params(h, w, scale)
+        crop_y, crop_x, crop_size = self._get_crop_params(h, w)
 
         lr_frames = []
         for i in range(center_frame - half, center_frame + half + 1):
@@ -151,7 +148,7 @@ class AV1CompressedVideoDataset(Dataset):
         lr_t = torch.from_numpy(np.stack(lr_frames, axis=0)).float().permute(0, 3, 1, 2) / 127.5 - 1.0
         hr_t = torch.from_numpy(hr_patch).float().permute(2, 0, 1) / 127.5 - 1.0
 
-        return {'lr_frames': lr_t, 'hr': hr_t, 'scale': scale}
+        return {'lr_frames': lr_t, 'hr': hr_t}
 
 
 class CleanVSRDataset(AV1CompressedVideoDataset):
@@ -180,18 +177,18 @@ class CleanVSRDataset(AV1CompressedVideoDataset):
 
     def __getitem__(self, item) -> dict:
         if isinstance(item, tuple):
-            video_name, _, center_frame, scale, ds_root = item
+            video_name, _, center_frame, ds_root = item
         else:
             plan = self._val_plan[item % len(self._val_plan)]
-            video_name, center_frame, scale, ds_root = (
-                plan['video'], plan['frame'], 4, plan['ds_root'])
+            video_name, center_frame, ds_root = (
+                plan['video'], plan['frame'], plan['ds_root'])
 
         self.load_video(video_name, ds_root=ds_root)
 
         half = self.frames // 2
         center_hr = self._hr_cache[center_frame]
         h, w = center_hr.shape[:2]
-        crop_y, crop_x, crop_size = self._get_crop_params(h, w, scale)
+        crop_y, crop_x, crop_size = self._get_crop_params(h, w)
 
         lr_frames = []
         for i in range(center_frame - half, center_frame + half + 1):
@@ -205,7 +202,7 @@ class CleanVSRDataset(AV1CompressedVideoDataset):
         lr_t = torch.from_numpy(np.stack(lr_frames, axis=0)).float().permute(0, 3, 1, 2) / 127.5 - 1.0
         hr_t = torch.from_numpy(hr_patch).float().permute(2, 0, 1) / 127.5 - 1.0
 
-        return {'lr_frames': lr_t, 'hr': hr_t, 'scale': scale}
+        return {'lr_frames': lr_t, 'hr': hr_t}
 
 
 class VideoBatchSampler(BatchSampler):
@@ -231,8 +228,7 @@ class VideoBatchSampler(BatchSampler):
                 chunk = pool[i:i + self.batch_size]
                 if len(chunk) < self.batch_size:
                     continue
-                scale = random.choice(self.dataset.scales)
-                yield [(v['name'], variant, f, scale, v['ds_root']) for f in chunk]
+                yield [(v['name'], variant, f, v['ds_root']) for f in chunk]
 
     def __len__(self):
         total = sum(max(0, v['n_frames'] - self.dataset.frames + 1) for v in self.dataset.videos)
@@ -240,21 +236,15 @@ class VideoBatchSampler(BatchSampler):
 
 
 def collate_vsr(batch: list[dict]) -> dict[str, Any]:
-    scale = batch[0]['scale']
-    for item in batch:
-        if item['scale'] != scale:
-            raise ValueError(f"Mixed scales in batch: {scale} vs {item['scale']}")
-
     lr_frames = torch.stack([item['lr_frames'] for item in batch], dim=0)
     hr = torch.stack([item['hr'] for item in batch], dim=0)
 
-    return {'lr_frames': lr_frames, 'hr': hr, 'scale': scale}
+    return {'lr_frames': lr_frames, 'hr': hr}
 
 
 def create_dataloader(
     datasets: list[str],
     batch_size: int = 16,
-    scales: list[int] = None,
     patch_size: int = 256,
     frames: int = 3,
     workers: int = 8,
@@ -265,7 +255,6 @@ def create_dataloader(
     cls = AV1CompressedVideoDataset if data_type == 'compressed' else CleanVSRDataset
     dataset = cls(
         datasets=datasets,
-        scales=scales,
         patch_size=patch_size,
         frames=frames,
         is_train=is_train,

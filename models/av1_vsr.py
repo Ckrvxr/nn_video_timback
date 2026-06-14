@@ -13,10 +13,8 @@ class AV1VSR(nn.Module):
         in_channels: int = 3,
         n_features: int = 64,
         n_blocks: int = 8,
-        scales: list[int] = None,
     ):
         super().__init__()
-        scales = scales or [1, 2, 4]
 
         self.conv_first = nn.Sequential(
             nn.Conv2d(in_channels, n_features, 3, padding=1, bias=False),
@@ -33,7 +31,7 @@ class AV1VSR(nn.Module):
         self.backbone = nn.Sequential(*backbone)
         self.conv_last = nn.Conv2d(n_features, n_features, 3, padding=1, bias=False)
 
-        self.upsampler = MultiScaleUpsampler(in_channels, n_features, scales)
+        self.upsampler = MultiScaleUpsampler(in_channels, n_features, [1])
 
     def forward(
         self, frame_prev: torch.Tensor, frame_cur: torch.Tensor,

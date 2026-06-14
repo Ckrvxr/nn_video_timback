@@ -20,7 +20,7 @@ from rich.table import Table
 from rich.console import Console
 
 from utils.blosc_cache import BloscCache
-from utils.video_loader import load_video_frames, probe_frame_count
+from utils.video_loader import load_video_frames_raw, probe_frame_count
 
 ASSUMED_HW = (2160, 3840)
 
@@ -33,11 +33,12 @@ def cache_one_video(args: tuple) -> tuple:
         n = probe_frame_count(str(video_path))
         raw = n * ASSUMED_HW[0] * ASSUMED_HW[1] * 3
         return (str(video_path), 'skip', n, 0, raw)
-    frames = load_video_frames(str(video_path))
-    raw = len(frames) * frames[0].nbytes
-    cache.put(video_path, frames)
+    raw_frames = load_video_frames_raw(str(video_path))
+    h, w = raw_frames[0][0].shape[:2]
+    raw = len(raw_frames) * h * w * 3
+    cache.put_raw(video_path, raw_frames)
     size = cp.stat().st_size
-    return (str(video_path), 'cached', len(frames), size, raw)
+    return (str(video_path), 'cached', len(raw_frames), size, raw)
 
 
 def fmt_time(s):

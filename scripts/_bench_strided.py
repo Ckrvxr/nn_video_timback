@@ -54,7 +54,7 @@ def main():
         in_channels=3,
         n_features=config['model']['n_features'],
         n_blocks=config['model']['n_blocks'],
-        scales=config['model']['scales'],
+
     )
 
     configs_to_test = [

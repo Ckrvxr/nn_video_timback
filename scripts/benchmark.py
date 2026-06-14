@@ -29,7 +29,6 @@ def setup(config_path: str, device: str = 'auto'):
         in_channels=3,
         n_features=config['model']['n_features'],
         n_blocks=config['model']['n_blocks'],
-        scales=config['model']['scales'],
     ).to(device)
     criterion = CompositeLoss(config['loss'], device=device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
@@ -37,11 +36,10 @@ def setup(config_path: str, device: str = 'auto'):
     return config, device, model, criterion, optimizer, scaler
 
 
-def make_loader(config, batch_size=None, workers=None, is_train=True, scales=None):
+def make_loader(config, batch_size=None, workers=None, is_train=True):
     return create_dataloader(
         datasets=config['data']['datasets'],
         batch_size=batch_size or config['training']['batch_size'],
-        scales=scales or [1],
         patch_size=config['data']['patch_size'],
         frames=config['data']['frames'],
         workers=workers if workers is not None else config['data'].get('workers', 4) if is_train else 0,
@@ -246,7 +244,6 @@ def cmd_infer_latency(args):
         in_channels=3,
         n_features=config['model']['n_features'],
         n_blocks=config['model']['n_blocks'],
-        scales=config['model']['scales'],
     ).to(device).eval()
 
     dtype = torch.float16 if args.fp16 else torch.float32
