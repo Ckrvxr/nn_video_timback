@@ -281,10 +281,13 @@ class VideoBatchSampler(BatchSampler):
     """Yields batches where all items share one video + variant.
     This lets __getitem__ load only one video per batch (~1.1 GB peak).
 
-    With ``clip_repeat > 1`` each video's frames are iterated multiple
-    times before moving to the next video.  This improves GPU utilization
-    when the model is small (frames stay hot in cache) and can also improve
-    convergence by exposing the model to repeated views of the same data.
+    All batches from all videos are collected and shuffled globally so
+    that consecutive batches come from different videos.
+
+    With ``clip_repeat > 1`` the shuffled batch list is iterated multiple
+    times.  This improves GPU utilization when the model is small (frames
+    stay hot in cache) and can also improve convergence by exposing the
+    model to repeated views of the same data.
 
     By default the variant is deterministic (variants[0]) so that the
     per-worker background preload can actually warm the cache. Set
@@ -298,25 +301,25 @@ class VideoBatchSampler(BatchSampler):
         self.clip_repeat = clip_repeat
 
     def __iter__(self):
-        videos = list(self.dataset.videos)
-        random.shuffle(videos)
         half = self.dataset.frames // 2
 
-        for v in videos:
+        all_batches = []
+        for v in self.dataset.videos:
             variant = random.choice(v['variants']) if self.shuffle_variants else v['variants'][0]
             valid_end = v['n_frames'] - half
             if valid_end <= half:
                 continue
-            # Each video's frames are iterated clip_repeat times before
-            # moving to the next video (keeps data in cache, feeds GPU).
             pool = list(range(half, valid_end))
-            for _ in range(self.clip_repeat):
-                random.shuffle(pool)
-                for i in range(0, len(pool), self.batch_size):
-                    chunk = pool[i:i + self.batch_size]
-                    if len(chunk) < self.batch_size:
-                        continue
-                    yield [(v['name'], variant, f, v['ds_root']) for f in chunk]
+            random.shuffle(pool)
+            for i in range(0, len(pool), self.batch_size):
+                chunk = pool[i:i + self.batch_size]
+                if len(chunk) < self.batch_size:
+                    continue
+                all_batches.append([(v['name'], variant, f, v['ds_root']) for f in chunk])
+
+        for _ in range(self.clip_repeat):
+            random.shuffle(all_batches)
+            yield from all_batches
 
     def __len__(self):
         total = sum(max(0, v['n_frames'] - self.dataset.frames + 1) for v in self.dataset.videos)

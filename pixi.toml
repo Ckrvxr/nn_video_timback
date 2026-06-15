@@ -31,6 +31,7 @@ lpips = "*"
 onnx = "*"
 huggingface-hub = "*"
 rich = ">=15.0.0, <16"
+loguru = "*"
 
 [target.osx-arm64.dependencies]
 pytorch = "*"

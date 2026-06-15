@@ -70,6 +70,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/default.yaml')
     parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument('--pretrained', type=str, default=None,
+                        help='Load only model weights, start fresh training')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--limit', type=int, default=0,
@@ -347,6 +349,10 @@ def main():
             scheduler.load_state_dict(ckpt['scheduler_state_dict'])
         start_epoch = ckpt['epoch'] + 1
         console.info(f'Resumed from epoch {start_epoch}')
+    elif args.pretrained:
+        ckpt = torch.load(args.pretrained, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt)
+        console.info(f'Loaded pretrained weights from {args.pretrained}')
 
     data_type = config['data'].get('data_type', 'compressed')
 

@@ -4,18 +4,18 @@ output_dir: runs/prod
 seed: 42
 
 data:
-  datasets: [./data/datasets/Takopii-no-Genzai, ./data/datasets/realisvideo-4k]
+  datasets: [./data/datasets/Takopii-no-Genza]
   patch_size: 512
   frames: 5
   val_batch_size: 2
-  workers: 2
+  workers: 1
   val_workers: 1
   data_type: compressed
   warm_cache: true
-  cache_max_videos: 4
-  prefetch_factor: 2
+  cache_max_videos: 2
+  prefetch_factor: 1
   shuffle_variants: false
-  clip_repeat: 1
+  clip_repeat: 10
 
 model:
   name: hyper_fixer
@@ -24,7 +24,7 @@ model:
   latent: 256
 
 training:
-  batch_size: 32
+  batch_size: 2
   epochs: 100
   lr: 2.0e-4
   lr_min: 1.0e-6
@@ -33,7 +33,7 @@ training:
   beta2: 0.99
   clip_grad: 1.0
   amp: true
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 16
   compile: false
 
 loss:
