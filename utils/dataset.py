@@ -1,3 +1,4 @@
+import json
 import random
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,11 @@ from torch.utils.data import Dataset, DataLoader, BatchSampler
 
 from .video_loader import probe_frame_count
 from .frame_cache import FrameCache
+
+
+def _worker_init(worker_id):
+    """Worker init: disable PyAV decode — workers read BloscCache only."""
+    FrameCache().set_decode_allowed(False)
 
 
 class AV1CompressedVideoDataset(Dataset):
@@ -55,9 +61,68 @@ class AV1CompressedVideoDataset(Dataset):
         from .video_loader import load_video_frames
         return load_video_frames(str(dir_path / f'{video_name}.mp4'))
 
+    @staticmethod
+    def _inventory_cache_path(ds_root: Path) -> Path:
+        return ds_root / '.inventory.json'
+
+    @staticmethod
+    def _inventory_fingerprint(ds_root: Path) -> str:
+        """Quick fingerprint of the dataset directory contents."""
+        hr_dir = ds_root / 'HR'
+        if not hr_dir.exists():
+            return ''
+        files = sorted(hr_dir.glob('*.mp4'))
+        variant_dirs = sorted(d for d in ds_root.iterdir()
+                              if d.is_dir() and d.name != 'HR')
+        parts = [f'{f.name}:{f.stat().st_mtime_ns}' for f in files]
+        for vd in variant_dirs:
+            v_files = sorted(vd.glob('*.mp4'))
+            parts.append(f'vd:{vd.name}')
+            parts.extend(f'{f.name}:{f.stat().st_mtime_ns}' for f in v_files)
+        return '|'.join(parts)
+
+    def _load_cached_inventory(self, ds_root: Path) -> list[dict] | None:
+        cache_path = self._inventory_cache_path(ds_root)
+        if not cache_path.exists():
+            return None
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                cached = json.load(f)
+            if cached.get('fingerprint') != self._inventory_fingerprint(ds_root):
+                return None
+            return [
+                {'name': v['name'], 'n_frames': v['n_frames'],
+                 'variants': v['variants'], 'ds_root': ds_root}
+                for v in cached.get('videos', [])
+            ]
+        except Exception:
+            return None
+
+    def _save_cached_inventory(self, ds_root: Path, videos: list[dict]):
+        cache_path = self._inventory_cache_path(ds_root)
+        try:
+            payload = {
+                'fingerprint': self._inventory_fingerprint(ds_root),
+                'videos': [
+                    {'name': v['name'], 'n_frames': v['n_frames'],
+                     'variants': v['variants']}
+                    for v in videos
+                ],
+            }
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            pass
+
     def _build_inventory(self) -> list[dict]:
         videos = []
         for ds_root in self.datasets:
+            cached = self._load_cached_inventory(ds_root)
+            if cached is not None:
+                videos.extend(cached)
+                continue
+
+            ds_videos = []
             hr_dir = ds_root / 'HR'
             variant_dirs = sorted(d for d in ds_root.iterdir()
                                   if d.is_dir() and d.name != 'HR')
@@ -70,14 +135,21 @@ class AV1CompressedVideoDataset(Dataset):
                     if self._variant_has(vd, name) and self._variant_n_frames(vd, name) == n:
                         variants.append(vd.name)
                 if variants:
-                    videos.append({'name': name, 'n_frames': n,
-                                   'variants': variants, 'ds_root': ds_root})
+                    ds_videos.append({'name': name, 'n_frames': n,
+                                      'variants': variants, 'ds_root': ds_root})
+            self._save_cached_inventory(ds_root, ds_videos)
+            videos.extend(ds_videos)
         return videos
 
     def _build_val_plan(self) -> list[dict]:
-        return [{'video': v['name'], 'variant': v['variants'][0],
-                 'frame': v['n_frames'] // 2, 'ds_root': v['ds_root']}
-                for v in self.videos]
+        """Enumerate every valid centre frame for validation."""
+        half = self.frames // 2
+        plan = []
+        for v in self.videos:
+            for f in range(half, v['n_frames'] - half):
+                plan.append({'video': v['name'], 'variant': v['variants'][0],
+                             'frame': f, 'ds_root': v['ds_root']})
+        return plan
 
     def load_video(self, video_name: str, variant_name: str, ds_root: Path):
         key = (video_name, variant_name, ds_root)
@@ -207,10 +279,23 @@ class CleanVSRDataset(AV1CompressedVideoDataset):
 
 class VideoBatchSampler(BatchSampler):
     """Yields batches where all items share one video + variant.
-    This lets __getitem__ load only one video per batch (~1.1 GB peak)."""
-    def __init__(self, dataset, batch_size):
+    This lets __getitem__ load only one video per batch (~1.1 GB peak).
+
+    With ``clip_repeat > 1`` each video's frames are iterated multiple
+    times before moving to the next video.  This improves GPU utilization
+    when the model is small (frames stay hot in cache) and can also improve
+    convergence by exposing the model to repeated views of the same data.
+
+    By default the variant is deterministic (variants[0]) so that the
+    per-worker background preload can actually warm the cache. Set
+    ``shuffle_variants=True`` to sample a random variant per video, at the
+    cost of more cache misses if variants are not all preloaded.
+    """
+    def __init__(self, dataset, batch_size, shuffle_variants=False, clip_repeat=1):
         self.dataset = dataset
         self.batch_size = batch_size
+        self.shuffle_variants = shuffle_variants
+        self.clip_repeat = clip_repeat
 
     def __iter__(self):
         videos = list(self.dataset.videos)
@@ -218,21 +303,47 @@ class VideoBatchSampler(BatchSampler):
         half = self.dataset.frames // 2
 
         for v in videos:
-            variant = random.choice(v['variants'])
+            variant = random.choice(v['variants']) if self.shuffle_variants else v['variants'][0]
+            valid_end = v['n_frames'] - half
+            if valid_end <= half:
+                continue
+            # Each video's frames are iterated clip_repeat times before
+            # moving to the next video (keeps data in cache, feeds GPU).
+            pool = list(range(half, valid_end))
+            for _ in range(self.clip_repeat):
+                random.shuffle(pool)
+                for i in range(0, len(pool), self.batch_size):
+                    chunk = pool[i:i + self.batch_size]
+                    if len(chunk) < self.batch_size:
+                        continue
+                    yield [(v['name'], variant, f, v['ds_root']) for f in chunk]
+
+    def __len__(self):
+        total = sum(max(0, v['n_frames'] - self.dataset.frames + 1) for v in self.dataset.videos)
+        return max(1, total // self.batch_size) * self.clip_repeat
+
+
+class ValVideoBatchSampler(BatchSampler):
+    """Deterministic batch sampler that covers every valid centre frame."""
+    def __init__(self, dataset, batch_size):
+        self.dataset = dataset
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        half = self.dataset.frames // 2
+        videos = list(self.dataset.videos)
+        for v in videos:
+            variant = v['variants'][0]
             valid_end = v['n_frames'] - half
             if valid_end <= half:
                 continue
             pool = list(range(half, valid_end))
-            random.shuffle(pool)
             for i in range(0, len(pool), self.batch_size):
                 chunk = pool[i:i + self.batch_size]
-                if len(chunk) < self.batch_size:
-                    continue
                 yield [(v['name'], variant, f, v['ds_root']) for f in chunk]
 
     def __len__(self):
-        total = sum(max(0, v['n_frames'] - self.dataset.frames + 1) for v in self.dataset.videos)
-        return max(1, total // self.batch_size)
+        return sum(max(0, v['n_frames'] - self.dataset.frames + 1) for v in self.dataset.videos)
 
 
 def collate_vsr(batch: list[dict]) -> dict[str, Any]:
@@ -251,7 +362,11 @@ def create_dataloader(
     is_train: bool = True,
     data_type: str = 'compressed',
     enable_cache: bool = True,
-) -> DataLoader | AV1CompressedVideoDataset:
+    cache_max_videos: int | None = None,
+    prefetch_factor: int | None = None,
+    shuffle_variants: bool = False,
+    clip_repeat: int = 1,
+) -> DataLoader:
     cls = AV1CompressedVideoDataset if data_type == 'compressed' else CleanVSRDataset
     dataset = cls(
         datasets=datasets,
@@ -261,15 +376,26 @@ def create_dataloader(
         enable_cache=enable_cache,
     )
 
+    if cache_max_videos is not None:
+        import os
+        os.environ['FRAME_CACHE_MAX_VIDEOS'] = str(cache_max_videos)
+        FrameCache()._max_videos = int(cache_max_videos)
+
+    if prefetch_factor is None:
+        prefetch_factor = 2 if workers > 0 else None
+
     kwargs = {
         'num_workers': workers,
         'pin_memory': True,
         'persistent_workers': workers > 0,
-        'prefetch_factor': 2 if workers > 0 else None,
+        'prefetch_factor': prefetch_factor if workers > 0 else None,
+        'worker_init_fn': _worker_init if workers > 0 else None,
     }
 
-    if is_train and batch_size > 1:
-        sampler = VideoBatchSampler(dataset, batch_size)
+    if batch_size > 1:
+        sampler = VideoBatchSampler(dataset, batch_size, shuffle_variants=shuffle_variants,
+                                     clip_repeat=clip_repeat) if is_train \
+            else ValVideoBatchSampler(dataset, batch_size)
         return DataLoader(
             dataset,
             batch_sampler=sampler,
@@ -277,5 +403,10 @@ def create_dataloader(
             **kwargs,
         )
 
-    # Validation: return dataset directly (manual loop in validate())
-    return dataset
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=collate_vsr,
+        shuffle=is_train,
+        **kwargs,
+    )

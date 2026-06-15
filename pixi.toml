@@ -62,7 +62,7 @@ jupyter = "*"
 # ═══════════════════════════════════════════
 #  🧪 Test — 快速迭代测试
 # ═══════════════════════════════════════════
-test-train = "python train.py --config configs/test.yaml"
+test-train = "python scripts/train.py --config configs/test.yaml"
 test-val   = "python scripts/run_validate.py --config configs/test.yaml --video data/raw_videos/test_clip/test_clip_1.mp4 --checkpoint runs/test/best.pth --crf 40 --preset 10 --output runs/validate/val_test.mp4 --tile-size 960 --tile-overlap 0 --scale 1"
 
 # ═══════════════════════════════════════════

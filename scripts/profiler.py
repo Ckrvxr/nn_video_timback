@@ -2,6 +2,7 @@
 """Comprehensive training profiler. Measures every stage to identify bottlenecks."""
 import argparse
 import gc
+import json
 import sys
 import time
 from collections import OrderedDict
@@ -12,10 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 import torch.nn as nn
 from yaml import safe_load
-from rich.table import Table
-from rich.console import Console
 
-console = Console()
+from utils.console import console
 
 
 # ─── helpers ──────────────────────────────────────────────
@@ -98,58 +97,72 @@ def fetch_one_batch(loader, device):
 
 # ─── 1. DataLoader throughput ────────────────────────────
 
-def bench_dataloader(config, n_batches=20, device=None):
-    console.rule('[bold]1. DataLoader Throughput')
+def bench_dataloader(config, n_batches=20, device=None, save_path=None):
+    console.info('--- DataLoader Throughput ---')
+    all_workers_data = {}
     rows = []
-    for w in [0, 2, 4, 8]:
+    for w in [0, 2, 4]:
         gc.collect()
         loader = make_loader(config, workers=w, is_train=True)
-        times = []
+        batch_times = []
         t0 = time.perf_counter()
         for i, batch in enumerate(loader):
             if i >= n_batches:
                 break
             now = time.perf_counter()
-            times.append((batch['lr_frames'].shape[0], now - t0))
+            dt = now - t0
+            batch_times.append(dt)
             t0 = now
 
-        batch_sizes = [b[0] for b in times]
-        batch_times = [b[1] for b in times]
-        n = len(batch_times) - 1  # skip first (cold start)
-        if n > 0:
-            avg_bt = avg(batch_times[1:])
+        cold_start = batch_times[0] if batch_times else 0.0
+        if len(batch_times) > 1:
+            tail = batch_times[1:]
+            tail_ms = [t * 1000 for t in tail]
+            tail_ms.sort()
+            p50 = tail_ms[len(tail_ms) // 2]
+            p95 = tail_ms[int(len(tail_ms) * 0.95)]
+            p99 = tail_ms[int(len(tail_ms) * 0.99)]
+            p99_9 = tail_ms[int(len(tail_ms) * 0.999)]
+            mx = tail_ms[-1]
+            avg_bt = avg(tail)
             its = 1.0 / avg_bt
-            fps = its * avg(batch_sizes[1:])
         else:
+            p50 = p95 = p99 = p99_9 = mx = 0.0
             avg_bt = float('nan')
             its = float('nan')
-            fps = float('nan')
-        cold_start = batch_times[0] if batch_times else float('nan')
-        rows.append((w, cold_start, avg_bt, its, fps))
 
-    t = Table(title='DataLoader Throughput')
-    t.add_column('Workers', style='cyan')
-    t.add_column('Cold Start', style='yellow')
-    t.add_column('Steady Batch', style='green')
-    t.add_column('Batches/s', style='magenta')
-    t.add_column('Frames/s', style='magenta')
-    for w, cold, steady, its, fps in rows:
-        t.add_row(f'{w}', fmt_s(cold), fmt_ms(steady), f'{its:.2f}', f'{fps:.0f}')
-    console.print(t)
+        rows.append((w, cold_start, avg_bt, its, p50, p95, p99, p99_9, mx))
+        all_workers_data[w] = {'cold_start_sec': cold_start, 'batch_times_sec': batch_times}
+
+    header = f"{'workers':>8} | {'ColdStart':>9} | {'P50':>8} | {'P95':>8} | {'P99':>8} | {'P99.9':>8} | {'Max':>8} | {'Max/P50':>8} | {'Avg':>8}"
+    console.info(header)
+    console.info('-' * len(header))
+    for w, cold, avg_bt, its, p50, p95, p99, p99_9, mx in rows:
+        ratio = f'{mx / p50:.1f}x' if p50 > 0 else 'N/A'
+        line = (f'workers={w:>2} | {fmt_s(cold):>9} | {fmt_ms(p50/1000):>8} | {fmt_ms(p95/1000):>8} | '
+                f'{fmt_ms(p99/1000):>8} | {fmt_ms(p99_9/1000):>8} | {fmt_ms(mx/1000):>8} | {ratio:>8} | {fmt_ms(avg_bt):>8}')
+        console.info(line)
+
+    if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.write_text(json.dumps(all_workers_data, indent=2))
+        console.info(f'Saved raw timing to {save_path}')
+
     return rows
 
 
 # ─── 2. CPU→GPU transfer + interpolation ─────────────────
 
 def bench_transfer(config, device, n_warmup=5, n_iter=30):
-    console.rule('[bold]2. CPU→GPU Transfer + Interpolation')
+    console.info('--- CPU->GPU Transfer + Interpolation ---')
     loader = make_loader(config, workers=0, is_train=True)
 
     # get one CPU batch
     for batch in loader:
         break
     lr_cpu = batch['lr_frames']  # (B, T, 3, H, W) on CPU
-    scale = batch['scale']
+    scale = 1  # training always uses scale=1
     B, T, C, H, W = lr_cpu.shape
 
     # warmup
@@ -183,23 +196,20 @@ def bench_transfer(config, device, n_warmup=5, n_iter=30):
     else:
         interpolation_times = [0.0] * n_iter
 
-    t = Table(title='Transfer + Preprocess')
-    t.add_column('Phase', style='cyan')
-    t.add_column('Median', style='green')
-    t.add_column('Mean', style='green')
-    t.add_column('p95', style='yellow')
-    t.add_row('CPU→GPU transfer', fmt_ms(median(transfer_times)), fmt_ms(avg(transfer_times)), fmt_ms(pct(transfer_times, 0.95)))
+    console.info(f'  {"Phase":<25} {"Median":>10} {"Mean":>10} {"p95":>10}')
+    console.info(f'  {"-"*55}')
+    console.info(f'  {"CPU->GPU transfer":<25} {fmt_ms(median(transfer_times)):>10} {fmt_ms(avg(transfer_times)):>10} {fmt_ms(pct(transfer_times, 0.95)):>10}')
     if scale > 1:
-        t.add_row('Interpolation (scale>1)', fmt_ms(median(interpolation_times)), fmt_ms(avg(interpolation_times)), fmt_ms(pct(interpolation_times, 0.95)))
-    t.add_row('Total preprocess', fmt_ms(median([a + b for a, b in zip(transfer_times, interpolation_times)])), '', '')
-    console.print(t)
+        console.info(f'  {"Interpolation (scale>1)":<25} {fmt_ms(median(interpolation_times)):>10} {fmt_ms(avg(interpolation_times)):>10} {fmt_ms(pct(interpolation_times, 0.95)):>10}')
+    total_median = median([a + b for a, b in zip(transfer_times, interpolation_times)])
+    console.info(f'  {"Total preprocess":<25} {fmt_ms(total_median):>10}')
     return transfer_times, interpolation_times
 
 
 # ─── 3. GPU pipeline breakdown ───────────────────────────
 
 def bench_gpu_pipeline(config, device, n_warmup=5, n_iter=30):
-    console.rule('[bold]3. GPU Pipeline Breakdown')
+    console.info('--- GPU Pipeline Breakdown ---')
     model = build_model(config, device).train()
     from losses.composite import CompositeLoss
     criterion = CompositeLoss(config['loss'], device=device)
@@ -208,7 +218,8 @@ def bench_gpu_pipeline(config, device, n_warmup=5, n_iter=30):
 
     amp_enabled = scaler is not None
     batch = fetch_one_batch(make_loader(config, workers=0, is_train=True), device)
-    lr, hr, scale = batch['lr_frames'], batch['hr'], batch['scale']
+    lr, hr = batch['lr_frames'], batch['hr']
+    scale = 1
 
     # warmup
     for _ in range(n_warmup):
@@ -270,11 +281,8 @@ def bench_gpu_pipeline(config, device, n_warmup=5, n_iter=30):
         total_t.append(t4 - t0)
 
     total_avg = avg(total_t)
-    t = Table(title='GPU Pipeline Breakdown')
-    t.add_column('Phase', style='cyan')
-    t.add_column('Median', style='green')
-    t.add_column('Mean', style='green')
-    t.add_column('%', style='yellow')
+    console.info(f'  {"Phase":<15} {"Median":>10} {"Mean":>10} {"%":>8}')
+    console.info(f'  {"-"*43}')
     phases = [
         ('Forward', fwd_t),
         ('Loss', loss_t),
@@ -283,8 +291,7 @@ def bench_gpu_pipeline(config, device, n_warmup=5, n_iter=30):
         ('Total', total_t),
     ]
     for name, ts in phases:
-        t.add_row(name, fmt_ms(median(ts)), fmt_ms(avg(ts)), f'{avg(ts) / total_avg * 100:.0f}%')
-    console.print(t)
+        console.info(f'  {name:<15} {fmt_ms(median(ts)):>10} {fmt_ms(avg(ts)):>10} {avg(ts) / total_avg * 100:.0f}%')
     return fwd_t, loss_t, bwd_t, optim_t, total_t
 
 
@@ -314,10 +321,11 @@ class HookTiming:
 
 
 def bench_submodules(config, device, n_warmup=5, n_iter=50):
-    console.rule('[bold]4. Submodule Latency')
+    console.info('--- Submodule Latency ---')
     model = build_model(config, device).eval()
     batch = fetch_one_batch(make_loader(config, workers=0, is_train=True), device)
-    lr, scale = batch['lr_frames'], batch['scale']
+    lr = batch['lr_frames']
+    scale = 1
 
     # attach hooks to key submodules
     ht = HookTiming()
@@ -390,16 +398,13 @@ def bench_submodules(config, device, n_warmup=5, n_iter=50):
             t1 = time.perf_counter()
             full_ts.append(t1 - t0)
 
-    t = Table(title='Submodule Latency')
-    t.add_column('Module', style='cyan')
-    t.add_column('Median', style='green')
-    t.add_column('% of total', style='yellow')
     total_m = median(full_ts)
-    t.add_row('Full model', fmt_ms(total_m), '100%')
+    console.info(f'  {"Module":<20} {"Median":>10} {"% of total":>12}')
+    console.info(f'  {"-"*42}')
+    console.info(f'  {"Full model":<20} {fmt_ms(total_m):>10} {"100%":>12}')
     for name, ts in mod_times.items():
         m = median(ts)
-        t.add_row(f'  {name}', fmt_ms(m), f'{m / total_m * 100:.0f}%')
-    console.print(t)
+        console.info(f'  {name:<20} {fmt_ms(m):>10} {m / total_m * 100:.0f}%')
     return mod_times, full_ts
 
 
@@ -445,7 +450,7 @@ def _call_submod(model, name, lr, scale):
 # ─── 5. Memory ───────────────────────────────────────────
 
 def bench_memory(config, device):
-    console.rule('[bold]5. Memory Footprint')
+    console.info('--- Memory Footprint ---')
     model = build_model(config, device).train()
     from losses.composite import CompositeLoss
     criterion = CompositeLoss(config['loss'], device=device)
@@ -459,19 +464,19 @@ def bench_memory(config, device):
     torch.cuda.reset_peak_memory_stats(device)
     loader = make_loader(config, workers=0, is_train=True)
     batch = fetch_one_batch(loader, device)
-    lr, hr, scale = batch['lr_frames'], batch['hr'], batch['scale']
+    lr, hr = batch['lr_frames'], batch['hr']
 
     # full train step
     optimizer.zero_grad()
     if scaler:
         with torch.amp.autocast(device_type='cuda'):
-            pred = model(lr[:, 1], lr[:, 2], lr[:, 3], scale=scale)
+            pred = model(lr[:, 0], lr[:, 1], lr[:, 2])
             loss_dict = criterion(pred, hr)
         scaler.scale(loss_dict['total']).backward()
         scaler.step(optimizer)
         scaler.update()
     else:
-        pred = model(lr[:, 1], lr[:, 2], lr[:, 3], scale=scale)
+        pred = model(lr[:, 0], lr[:, 1], lr[:, 2])
         loss_dict = criterion(pred, hr)
         loss_dict['total'].backward()
         optimizer.step()
@@ -482,53 +487,44 @@ def bench_memory(config, device):
     batch_bytes = (lr.numel() + hr.numel()) * lr.element_size()
     free_before = torch.cuda.get_device_properties(device).total_memory - torch.cuda.memory_allocated(device)
 
-    t = Table(title='Memory Footprint')
-    t.add_column('Metric', style='cyan')
-    t.add_column('Value', style='green')
-    t.add_row('Model params (est.)', f'{model_params / 1024**2:.1f} MB')
-    t.add_row('Batch size', f'{lr.shape[0]}×{lr.shape[2]}p')
-    t.add_row('Batch data', f'{batch_bytes / 1024**2:.1f} MB')
-    t.add_row('Peak allocated VRAM', f'{peak / 1024**2:.1f} MB')
-    t.add_row('Peak reserved VRAM', f'{peak_reserved / 1024**2:.1f} MB')
-    t.add_row('Total GPU VRAM', f'{torch.cuda.get_device_properties(device).total_memory / 1024**2:.0f} MB')
-    t.add_row('Free after step', f'{free_before / 1024**2:.1f} MB')
-    console.print(t)
+    console.info(f'  {"Metric":<25} {"Value":>12}')
+    console.info(f'  {"-"*37}')
+    console.info(f'  {"Model params (est.)":<25} {model_params / 1024**2:.1f} MB')
+    console.info(f'  {"Batch size":<25} {lr.shape[0]}.{lr.shape[2]}p')
+    console.info(f'  {"Batch data":<25} {batch_bytes / 1024**2:.1f} MB')
+    console.info(f'  {"Peak allocated VRAM":<25} {peak / 1024**2:.1f} MB')
+    console.info(f'  {"Peak reserved VRAM":<25} {peak_reserved / 1024**2:.1f} MB')
+    console.info(f'  {"Total GPU VRAM":<25} {torch.cuda.get_device_properties(device).total_memory / 1024**2:.0f} MB')
+    console.info(f'  {"Free after step":<25} {free_before / 1024**2:.1f} MB')
     return peak
 
 
 # ─── 6. Bottleneck summary ──────────────────────────────
 
 def print_summary(dl_rows, total_t):
-    console.rule('[bold]6. Bottleneck Summary')
+    console.info('--- Bottleneck Summary ---')
     best_dl = min((r for r in dl_rows if r[2] != float('nan')), key=lambda r: r[2]) if dl_rows else None
     gpu_step = median(total_t) if total_t else 0
-
-    t = Table(title='Bottleneck Analysis')
-    t.add_column('Metric', style='cyan')
-    t.add_column('Value', style='green')
-    t.add_column('Status', style='bold')
 
     if best_dl:
         dl_time = best_dl[2]
         dl_its = best_dl[3]
-        t.add_row('Best DataLoader (workers)', f'{best_dl[0]}', '')
-        t.add_row('Steady batch time', fmt_ms(dl_time), '')
-        t.add_row('GPU step time', fmt_ms(gpu_step), '')
+        console.info(f'  Best DataLoader workers: {best_dl[0]}')
+        console.info(f'  Steady batch time:       {fmt_ms(dl_time)}')
+        console.info(f'  GPU step time:           {fmt_ms(gpu_step)}')
 
         ratio = dl_time / gpu_step if gpu_step > 0 else float('inf')
         if ratio > 1.2:
-            status = '⚠️ DataLoader bound (waiting for data)'
+            status = 'DataLoader bound (waiting for data)'
         elif ratio < 0.8:
-            status = '✅ GPU bound (DataLoader faster than GPU)'
+            status = 'GPU bound (DataLoader faster than GPU)'
         else:
-            status = '~ Balanced'
-        t.add_row('DL / GPU ratio', f'{ratio:.2f}x', status)
+            status = 'Balanced'
+        console.info(f'  DL / GPU ratio:          {ratio:.2f}x  ({status})')
 
         max_its = 1.0 / max(dl_time, gpu_step)
-        t.add_row('Max achievable iter/s', f'{max_its:.2f}', '')
-        t.add_row('Samples/s', f'{max_its * 16:.0f}', '')  # batch_size=16
-
-    console.print(t)
+        console.info(f'  Max achievable iter/s:   {max_its:.2f}')
+        console.info(f'  Samples/s (bs=16):       {max_its * 16:.0f}')
 
 
 # ─── CLI ─────────────────────────────────────────────────
@@ -542,6 +538,7 @@ def main():
     parser.add_argument('--n-iter', type=int, default=30)
     parser.add_argument('--only', type=str, default=None,
                         choices=['dataloader', 'transfer', 'gpu', 'submodules', 'memory'])
+    parser.add_argument('--save', type=str, default=None, help='save raw batch timing JSON')
     args = parser.parse_args()
 
     if args.device == 'auto':
@@ -551,32 +548,27 @@ def main():
 
     config = safe_load(open(args.config))
     model_name = config['model'].get('name', 'av1_vsr')
-    console.print(f'[bold]Config:[/bold] {args.config}')
-    console.print(f'[bold]Model:[/bold] {model_name}')
-    console.print(f'[bold]Device:[/bold] {device}\n')
+    console.info(f'Config: {args.config}')
+    console.info(f'Model: {model_name}')
+    console.info(f'Device: {device}')
 
     dl_rows = []
     total_t = []
 
     if args.only is None or args.only == 'dataloader':
-        dl_rows = bench_dataloader(config, n_batches=args.n_batches, device=device)
-        console.print()
+        dl_rows = bench_dataloader(config, n_batches=args.n_batches, device=device, save_path=args.save)
 
     if args.only is None or args.only == 'transfer':
         bench_transfer(config, device, n_warmup=args.n_warmup, n_iter=args.n_iter)
-        console.print()
 
     if args.only is None or args.only == 'gpu':
         *_, total_t = bench_gpu_pipeline(config, device, n_warmup=args.n_warmup, n_iter=args.n_iter)
-        console.print()
 
     if args.only is None or args.only == 'submodules':
         bench_submodules(config, device, n_warmup=args.n_warmup, n_iter=args.n_iter * 2)
-        console.print()
 
     if args.only is None or args.only == 'memory':
         bench_memory(config, device)
-        console.print()
 
     if args.only is None:
         print_summary(dl_rows, total_t)

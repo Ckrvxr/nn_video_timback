@@ -8,16 +8,12 @@ Usage:
 import argparse
 import sys
 import time
-from collections import deque
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from rich.live import Live
-from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn, TimeRemainingColumn
-from rich.table import Table
-from rich.console import Console
+from tqdm import tqdm
 
 from utils.blosc_cache import BloscCache
 from utils.video_loader import load_video_frames_raw, probe_frame_count
@@ -50,13 +46,13 @@ def fmt_time(s):
 
 
 def main():
+    from utils.console import console
+
     parser = argparse.ArgumentParser(description='Pre-cache video as .blp files')
     parser.add_argument('--datasets', nargs='+', required=True)
     parser.add_argument('--variants', nargs='+', default=None)
     parser.add_argument('--workers', type=int, default=2)
     args = parser.parse_args()
-
-    console = Console()
 
     for ds_root_str in args.datasets:
         ds_root = Path(ds_root_str)
@@ -79,7 +75,7 @@ def main():
 
         n_total = len(todos)
         if not todos:
-            console.print(f'[green]{ds_root.name}[/] — all cached.')
+            console.success(f'{ds_root.name} — all cached.')
             continue
 
         n_workers = min(args.workers, n_total)
@@ -87,85 +83,38 @@ def main():
         done = 0
         total_bytes = 0
         total_raw = 0
-        recent = deque(maxlen=4)
 
-        progress = Progress(
-            TextColumn('[cyan]{task.description}[/]'),
-            BarColumn(),
-            TextColumn('{task.completed}/{task.total}'),
-            TextColumn('[progress.percentage]{task.percentage:>3.0f}%'),
-            TimeElapsedColumn(), TextColumn('•'), TimeRemainingColumn(),
-            TextColumn('• {task.fields[r]:.1f}x •{task.fields[g]}'),
-        )
-        task = progress.add_task(ds_root.name, total=n_total, r=1.0, g='0GB')
-
-        def build_table():
-            t = Table(box=None, show_header=True, header_style='dim', padding=(0, 1, 0, 1))
-            t.add_column('File', no_wrap=True)
-            t.add_column('Orig', justify='right')
-            t.add_column('Comp', justify='right')
-            t.add_column('Ratio', justify='right')
-            t.add_column('Disk', justify='right')
-            t.add_column('ETA', justify='right')
-            for entry in recent:
-                fname, raw_b, comp_b, _, _, _, _, cumul = entry
-                r = raw_b / comp_b if comp_b else 0
-                t.add_row(f'{fname}', f'{raw_b/1e6:.0f}M', f'{comp_b/1e6:.0f}M',
-                          f'{r:.1f}x', f'{cumul/1e9:.1f}G', '')
-            return t
-
-        def update():
-            elapsed = time.perf_counter() - start
-            rate = done / elapsed if elapsed else 0
-            gb = total_bytes / (1 << 30)
-            ratio = total_raw / total_bytes if total_bytes else 0
-            progress.update(task, completed=done, r=ratio, g=f'{gb:.1f}GB')
-            t = build_table()
-            if done == n_total:
-                est = gb
-                eta_str = ''
-            elif done:
-                est = gb / done * n_total
-                eta_sec = (n_total - done) / rate if rate else 0
-                eta_str = fmt_time(eta_sec)
-            else:
-                est = 0
-                eta_str = ''
-            t.add_row('[dim]──[/]'*5)
-            r = total_raw / total_bytes if total_bytes else 0
-            t.add_row(f'[bold]{done}/{n_total}[/]',
-                      f'[bold]{total_raw/1e6:.0f}M[/]', f'[bold]{total_bytes/1e6:.0f}M[/]',
-                      f'[bold]{r:.1f}x[/]', f'[bold]~{est:.0f}G[/]',
-                      f'{eta_str}')
-            return t
-
-        def report(path, status, n, comp_b, raw_b):
-            nonlocal done, total_bytes, total_raw
-            done += 1
-            total_bytes += comp_b
-            total_raw += raw_b
-            recent.append((Path(path).name, raw_b, comp_b, status, n, path, False, total_bytes))
-
+        pbar = tqdm(total=n_total, desc=ds_root.name, unit='file')
         try:
-            with Live(update(), refresh_per_second=2.5, transient=True, console=console) as live:
-                if n_workers > 1:
-                    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-                        fut_map = {pool.submit(cache_one_video, t): t for t in todos}
-                        for fut in as_completed(fut_map):
-                            report(*fut.result())
-                            live.update(update())
-                else:
-                    for todo in todos:
-                        report(*cache_one_video(todo))
-                        live.update(update())
+            if n_workers > 1:
+                with ProcessPoolExecutor(max_workers=n_workers) as pool:
+                    fut_map = {pool.submit(cache_one_video, t): t for t in todos}
+                    for fut in as_completed(fut_map):
+                        path, status, n, comp_b, raw_b = fut.result()
+                        done += 1
+                        total_bytes += comp_b
+                        total_raw += raw_b
+                        pbar.update(1)
+                        pbar.set_postfix(last=Path(path).name, status=status)
+            else:
+                for todo in todos:
+                    path, status, n, comp_b, raw_b = cache_one_video(todo)
+                    done += 1
+                    total_bytes += comp_b
+                    total_raw += raw_b
+                    pbar.update(1)
+                    pbar.set_postfix(last=Path(path).name, status=status)
         except KeyboardInterrupt:
-            console.print(f'\n[red]Interrupted[/] — {done} videos, {total_bytes/(1<<30):.1f}GB')
+            console.warning(f'Interrupted — {done} videos, {total_bytes/(1<<30):.1f}GB')
+            pbar.close()
+            return
 
+        pbar.close()
         if done:
             elapsed = time.perf_counter() - start
             savings = (total_raw - total_bytes) / total_raw * 100 if total_raw else 0
-            console.print(f'[green]Done[/]  {done} videos  {fmt_time(elapsed)}  '
-                          f'{total_bytes/(1<<30):.1f}GB  ({savings:.0f}% saved)')
+            console.success(f'{done} videos  {fmt_time(elapsed)}  '
+                            f'{total_bytes/(1<<30):.1f}GB  ({savings:.0f}% saved)')
 
 
 if __name__ == '__main__':
