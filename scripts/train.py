@@ -259,6 +259,8 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     training_cfg = config['training_settings']
     model_cfg = config['model_architecture']
     dataset_cfg = config['dataset']
+    logging_cfg = config.get('logging_settings', {})
+    log_interval = logging_cfg.get('log_interval', 50)
     
     grad_accum = training_cfg.get('gradient_accumulation_steps', 1)
     clip_grad = training_cfg['gradient_clipping_threshold']
@@ -420,6 +422,29 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
         batch_loss = loss_dict['total'].item()
         total_loss += batch_loss
 
+        # Print detailed ASCII Leaderboard and Loss Breakdown every log_interval batches
+        if (batch_idx + 1) % log_interval == 0:
+            total_selections = expert_counts.sum().item()
+            if total_selections > 0:
+                counts, indices = torch.sort(expert_counts, descending=True)
+                console.info(f"\n🏆 Expert Leaderboard & Loss Breakdown (Batch {batch_idx + 1}/{n_batches})")
+                console.info("=" * 60)
+                console.info(f"{'Rank':<6}{'Expert ID':<12}{'Count':<10}{'Percentage':<12}")
+                console.info("-" * 60)
+                for rank in range(min(5, len(indices))):
+                    idx = indices[rank].item()
+                    cnt = counts[rank].item()
+                    pct = (cnt / total_selections) * 100
+                    if cnt > 0:
+                        console.info(f"{rank+1:<6}Expert {idx:02d}{'':<4}{int(cnt):<10}{pct:.1f}%")
+                console.info("-" * 60)
+                console.info("Loss Components (Unscaled):")
+                for name, val in loss_dict.items():
+                    if name != 'total':
+                        console.info(f"  - {name.capitalize():<15}: {val.item():.6f}")
+                console.info(f"  - Total Loss{'':<5}: {loss_dict['total'].item():.6f}")
+                console.info("=" * 60)
+
         t_now = time.perf_counter()
         batch_time = t_now - t_batch_start
         data_time = data_end - t_batch_start
@@ -428,7 +453,23 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
         t_batch_start = t_now
 
         samples_sec = bs / batch_time if batch_time > 0 else 0
-        pbar.set_postfix(loss=f'{batch_loss:.4f}', samples=f'{samples_sec:.0f}/s')
+        
+        # Format Top-3 experts for tqdm postfix
+        total_sel = expert_counts.sum().item()
+        if total_sel > 0:
+            top_val, top_idx = torch.topk(expert_counts, k=min(3, len(expert_counts)))
+            top_str = ",".join([f"E{idx.item()}" for idx, val in zip(top_idx, top_val) if val > 0])
+        else:
+            top_str = "None"
+            
+        pbar.set_postfix(
+            loss=f"{batch_loss:.4f}",
+            char=f"{loss_dict.get('char', torch.tensor(0.0)).item():.4f}",
+            fft=f"{loss_dict.get('fft', torch.tensor(0.0)).item():.4f}",
+            moe=f"{loss_dict.get('moe', torch.tensor(0.0)).item():.4f}",
+            top=top_str,
+            samples=f"{samples_sec:.0f}/s"
+        )
         pbar.update(1)
 
     pbar.close()
