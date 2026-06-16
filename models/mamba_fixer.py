@@ -18,6 +18,7 @@ class MambaFixer(nn.Module):
                  dilation_rates: list[int] | None = None):
         super().__init__()
         self.num_features = num_features
+        self.n_experts = num_experts
 
         self.downsample = DownsampleChain()
         self.patch_embed = PatchEmbed(1, num_features, 4)
