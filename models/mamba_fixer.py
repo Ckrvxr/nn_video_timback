@@ -105,7 +105,7 @@ class MambaFixer(nn.Module):
         if ssm_only:
             return None
 
-        idx, logits = self.router(z_t)
+        idx, logits = self.router(z_t, ictcp)
 
         self._last_expert_idx = idx.detach().cpu()
         self._balancing_loss = self.router.load_balancing_loss(logits)
