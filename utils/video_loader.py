@@ -9,42 +9,53 @@ import numpy as np
 
 
 def _read_plane(plane) -> np.ndarray:
-    """Read a YUV plane, stripping line_size alignment padding."""
-    buf = np.frombuffer(bytes(plane), dtype=np.uint8).reshape(plane.height, plane.line_size)
+    """Read a YUV plane efficiently using buffer protocol."""
+    # np.frombuffer(plane) avoids the heavy bytes(plane) copy
+    buf = np.frombuffer(plane, dtype=np.uint8).reshape(plane.height, plane.line_size)
+    if plane.line_size == plane.width:
+        return buf.copy()
     return buf[:, :plane.width].copy()
 
 
 def load_video_frames(video_path: str) -> list[np.ndarray]:
-    """Decode video into list of YUV444 uint8 arrays (H×W×3).
-
-    Y channel is native from decoder (lossless). U/V are cubic
-    upsampled from half-resolution YUV420 planes.
-    """
+    """Decode video into list of YUV444 uint8 arrays (H×W×3)."""
     frames = []
     with av.open(video_path) as container:
+        stream = container.streams.video[0]
+        # Enable multi-threaded decoding
+        stream.thread_type = 'AUTO'
+        
         for frame in container.decode(video=0):
             h, w = frame.height, frame.width
+            # Use PyAV's built-in fast conversion if possible, 
+            # but for YUV420->YUV444 manual might be more precise for your VSR
             y = _read_plane(frame.planes[0])
-            u = cv2.resize(
-                _read_plane(frame.planes[1]),
-                (w, h), interpolation=cv2.INTER_LINEAR)
-            v = cv2.resize(
-                _read_plane(frame.planes[2]),
-                (w, h), interpolation=cv2.INTER_LINEAR)
+            u = cv2.resize(_read_plane(frame.planes[1]), (w, h), interpolation=cv2.INTER_LINEAR)
+            v = cv2.resize(_read_plane(frame.planes[2]), (w, h), interpolation=cv2.INTER_LINEAR)
             frames.append(np.stack([y, u, v], axis=-1))
     return frames
 
 
-def load_video_frames_raw(video_path: str) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Decode video into list of (Y_plane, U_plane, V_plane) tuples.
+def load_video_frames_raw_generator(video_path: str):
+    """Generator version to save memory: yields (Y, U, V) tuples one by one."""
+    with av.open(video_path) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = 'AUTO'
+        for frame in container.decode(video=0):
+            y = _read_plane(frame.planes[0])
+            u = _read_plane(frame.planes[1])
+            v = _read_plane(frame.planes[2])
+            yield y, u, v
 
-    Each plane is uint8 with native YUV420 resolution:
-      Y: (H, W), U/V: (H/2, W/2).  No upsampling — lossless decode path.
-    """
+
+def load_video_frames_raw(video_path: str) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Decode video into list of (Y, U, V) tuples."""
     out = []
     with av.open(video_path) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = 'AUTO'
+        
         for frame in container.decode(video=0):
-            h, w = frame.height, frame.width
             y = _read_plane(frame.planes[0])
             u = _read_plane(frame.planes[1])
             v = _read_plane(frame.planes[2])

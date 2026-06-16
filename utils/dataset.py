@@ -157,7 +157,7 @@ class AV1CompressedVideoDataset(Dataset):
             return
 
         if self.enable_cache:
-            FrameCache().set_cache_root(ds_root / 'cache')
+            FrameCache().set_cache_root(ds_root / 'cache_yuv')
 
         hr_path = ds_root / 'HR' / f'{video_name}.mp4'
         lr_path = ds_root / variant_name / f'{video_name}.mp4'
@@ -196,18 +196,29 @@ class AV1CompressedVideoDataset(Dataset):
 
     def __getitem__(self, item) -> dict:
         if isinstance(item, tuple):
-            video_name, variant_name, center_frame, ds_root = item
+            video_name, variant_name, center_frame, ds_root, *extra = item
+            crop_seed = extra[0] if len(extra) > 0 else None
+            video_id = extra[1] if len(extra) > 1 else None
         else:
             plan = self._val_plan[item % len(self._val_plan)]
             video_name, variant_name, center_frame, ds_root = (
                 plan['video'], plan['variant'], plan['frame'], plan['ds_root'])
+            crop_seed = None
+            video_id = None
 
         self.load_video(video_name, variant_name, ds_root)
 
         half = self.frames // 2
         center_hr = self._hr_cache[center_frame]
         h, w = center_hr.shape[:2]
-        crop_y, crop_x, crop_size = self._get_crop_params(h, w)
+
+        if crop_seed is not None:
+            rng = random.Random(crop_seed)
+            crop_y = rng.randint(0, max(0, h - self.patch_size))
+            crop_x = rng.randint(0, max(0, w - self.patch_size))
+            crop_size = self.patch_size
+        else:
+            crop_y, crop_x, crop_size = self._get_crop_params(h, w)
 
         lr_frames = []
         for i in range(center_frame - half, center_frame + half + 1):
@@ -217,10 +228,19 @@ class AV1CompressedVideoDataset(Dataset):
 
         hr_patch = self._safe_crop(center_hr, crop_y, crop_x, crop_size)
 
+        # hr_prev for temporal loss if needed
+        hr_prev_frame = max(0, center_frame - 1)
+        hr_prev_patch = self._safe_crop(self._hr_cache[hr_prev_frame], crop_y, crop_x, crop_size)
+
+        # Convert to torch and float32, permute and normalize to YUV range [-1, 1].
         lr_t = torch.from_numpy(np.stack(lr_frames, axis=0)).float().permute(0, 3, 1, 2) / 127.5 - 1.0
         hr_t = torch.from_numpy(hr_patch).float().permute(2, 0, 1) / 127.5 - 1.0
+        hr_prev_t = torch.from_numpy(hr_prev_patch).float().permute(2, 0, 1) / 127.5 - 1.0
 
-        return {'lr_frames': lr_t, 'hr': hr_t}
+        out = {'lr_frames': lr_t, 'hr': hr_t, 'hr_prev': hr_prev_t}
+        if video_id is not None:
+            out['video_id'] = video_id
+        return out
 
 
 class CleanVSRDataset(AV1CompressedVideoDataset):
@@ -230,7 +250,7 @@ class CleanVSRDataset(AV1CompressedVideoDataset):
             return
 
         if self.enable_cache:
-            FrameCache().set_cache_root(ds_root / 'cache')
+            FrameCache().set_cache_root(ds_root / 'cache_yuv')
 
         hr_path = ds_root / 'HR' / f'{video_name}.mp4'
         self._hr_cache, self._lr_cache = FrameCache().get_or_load(hr_path, hr_path)
@@ -249,18 +269,29 @@ class CleanVSRDataset(AV1CompressedVideoDataset):
 
     def __getitem__(self, item) -> dict:
         if isinstance(item, tuple):
-            video_name, _, center_frame, ds_root = item
+            video_name, _, center_frame, ds_root, *extra = item
+            crop_seed = extra[0] if len(extra) > 0 else None
+            video_id = extra[1] if len(extra) > 1 else None
         else:
             plan = self._val_plan[item % len(self._val_plan)]
             video_name, center_frame, ds_root = (
                 plan['video'], plan['frame'], plan['ds_root'])
+            crop_seed = None
+            video_id = None
 
         self.load_video(video_name, ds_root=ds_root)
 
         half = self.frames // 2
         center_hr = self._hr_cache[center_frame]
         h, w = center_hr.shape[:2]
-        crop_y, crop_x, crop_size = self._get_crop_params(h, w)
+
+        if crop_seed is not None:
+            rng = random.Random(crop_seed)
+            crop_y = rng.randint(0, max(0, h - self.patch_size))
+            crop_x = rng.randint(0, max(0, w - self.patch_size))
+            crop_size = self.patch_size
+        else:
+            crop_y, crop_x, crop_size = self._get_crop_params(h, w)
 
         lr_frames = []
         for i in range(center_frame - half, center_frame + half + 1):
@@ -271,10 +302,14 @@ class CleanVSRDataset(AV1CompressedVideoDataset):
 
         hr_patch = self._safe_crop(center_hr, crop_y, crop_x, crop_size)
 
+        hr_prev_frame = max(0, center_frame - 1)
+        hr_prev_patch = self._safe_crop(self._hr_cache[hr_prev_frame], crop_y, crop_x, crop_size)
+
         lr_t = torch.from_numpy(np.stack(lr_frames, axis=0)).float().permute(0, 3, 1, 2) / 127.5 - 1.0
         hr_t = torch.from_numpy(hr_patch).float().permute(2, 0, 1) / 127.5 - 1.0
+        hr_prev_t = torch.from_numpy(hr_prev_patch).float().permute(2, 0, 1) / 127.5 - 1.0
 
-        return {'lr_frames': lr_t, 'hr': hr_t}
+        return {'lr_frames': lr_t, 'hr': hr_t, 'hr_prev': hr_prev_t}
 
 
 class VideoBatchSampler(BatchSampler):
@@ -349,11 +384,55 @@ class ValVideoBatchSampler(BatchSampler):
         return sum(max(0, v['n_frames'] - self.dataset.frames + 1) for v in self.dataset.videos)
 
 
+class SequentialVideoBatchSampler(BatchSampler):
+    """Yields sequential frame batches per video, video-shuffled.
+
+    Each video's frames are walked in temporal order, chunked into batches.
+    Videos are shuffled globally so order changes each epoch.
+    Crop position is fixed per video (seeded by video name).
+    """
+    def __init__(self, dataset, batch_size, shuffle_variants=False):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle_variants = shuffle_variants
+
+    def __iter__(self):
+        half = self.dataset.frames // 2
+
+        video_batches = []
+        for v in self.dataset.videos:
+            variant = random.choice(v['variants']) if self.shuffle_variants else v['variants'][0]
+            valid_end = v['n_frames'] - half
+            if valid_end <= half:
+                continue
+            crop_seed = hash(f"{v['name']}_{v['ds_root']}") & 0x7FFFFFFF
+            video_id = hash(f"{v['name']}_{v['ds_root']}_{variant}") & 0x7FFFFFFF
+            frames = list(range(half, valid_end))
+            for i in range(0, len(frames), self.batch_size):
+                chunk = frames[i:i + self.batch_size]
+                if len(chunk) < self.batch_size:
+                    continue
+                video_batches.append(
+                    [(v['name'], variant, f, v['ds_root'], crop_seed, video_id) for f in chunk]
+                )
+
+        random.shuffle(video_batches)
+        yield from video_batches
+
+    def __len__(self):
+        total = sum(max(0, v['n_frames'] - self.dataset.frames + 1) for v in self.dataset.videos)
+        return max(1, total // self.batch_size)
+
+
 def collate_vsr(batch: list[dict]) -> dict[str, Any]:
     lr_frames = torch.stack([item['lr_frames'] for item in batch], dim=0)
     hr = torch.stack([item['hr'] for item in batch], dim=0)
 
-    return {'lr_frames': lr_frames, 'hr': hr}
+    out = {'lr_frames': lr_frames, 'hr': hr}
+    video_id = batch[0].get('video_id')
+    if video_id is not None:
+        out['video_id'] = video_id
+    return out
 
 
 def create_dataloader(
@@ -369,6 +448,8 @@ def create_dataloader(
     prefetch_factor: int | None = None,
     shuffle_variants: bool = False,
     clip_repeat: int = 1,
+    sequential: bool = False,
+    persistent_workers: bool | None = None,
 ) -> DataLoader:
     cls = AV1CompressedVideoDataset if data_type == 'compressed' else CleanVSRDataset
     dataset = cls(
@@ -387,18 +468,26 @@ def create_dataloader(
     if prefetch_factor is None:
         prefetch_factor = 2 if workers > 0 else None
 
+    if persistent_workers is None:
+        persistent_workers = workers > 0
+
     kwargs = {
         'num_workers': workers,
         'pin_memory': True,
-        'persistent_workers': workers > 0,
+        'persistent_workers': persistent_workers,
         'prefetch_factor': prefetch_factor if workers > 0 else None,
         'worker_init_fn': _worker_init if workers > 0 else None,
     }
 
     if batch_size > 1:
-        sampler = VideoBatchSampler(dataset, batch_size, shuffle_variants=shuffle_variants,
-                                     clip_repeat=clip_repeat) if is_train \
-            else ValVideoBatchSampler(dataset, batch_size)
+        if is_train and sequential:
+            sampler = SequentialVideoBatchSampler(dataset, batch_size,
+                                                   shuffle_variants=shuffle_variants)
+        elif is_train:
+            sampler = VideoBatchSampler(dataset, batch_size, shuffle_variants=shuffle_variants,
+                                         clip_repeat=clip_repeat)
+        else:
+            sampler = ValVideoBatchSampler(dataset, batch_size)
         return DataLoader(
             dataset,
             batch_sampler=sampler,

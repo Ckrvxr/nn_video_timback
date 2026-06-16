@@ -1,14 +1,76 @@
 import argparse
 import json
+import os
 import queue
 import random
 import shutil
+import signal
 import sys
 import threading
 import time
 import warnings
 from datetime import datetime
 from pathlib import Path
+
+# Global control flags for training loop pause/graceful exit
+EXIT_FLAG = False
+RUN_DIR = None
+MAIN_PID = os.getpid()
+
+def sigint_handler(signum, frame):
+    global EXIT_FLAG, RUN_DIR
+    if os.getpid() != MAIN_PID:
+        return
+    # Ignore signal during interactive menu
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    print("\n\n=== Training Paused (Ctrl+C detected) ===")
+    print("Select an option:")
+    print("  [c] Continue training")
+    if RUN_DIR:
+        print("  [p] Pause training (creates .pause file, delete it to resume)")
+    print("  [s] Save checkpoint and exit gracefully")
+    print("  [e] Exit immediately without saving")
+    
+    while True:
+        try:
+            prompt = "Choice [c/p/s/e]: " if RUN_DIR else "Choice [c/s/e]: "
+            choice = input(prompt).strip().lower()
+            if choice == 'c':
+                print("Resuming training...")
+                if RUN_DIR:
+                    pause_file = RUN_DIR / '.pause'
+                    if pause_file.exists():
+                        try:
+                            pause_file.unlink()
+                        except Exception:
+                            pass
+                signal.signal(signal.SIGINT, sigint_handler)
+                return
+            elif choice == 'p' and RUN_DIR:
+                pause_file = RUN_DIR / '.pause'
+                try:
+                    pause_file.touch()
+                    print(f"Created '{pause_file}'. Training is now paused.")
+                    print("To resume: delete this file, or press Ctrl+C again to choose another option.")
+                except Exception as e:
+                    print(f"Error creating pause file: {e}")
+                signal.signal(signal.SIGINT, sigint_handler)
+                return
+            elif choice == 's':
+                print("Graceful exit requested. Will save checkpoint and stop at next batch/epoch.")
+                EXIT_FLAG = True
+                signal.signal(signal.SIGINT, lambda s, f: os._exit(1))
+                return
+            elif choice == 'e':
+                print("Exiting immediately...")
+                os._exit(1)
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting immediately...")
+            os._exit(1)
+        except Exception:
+            pass
+
+signal.signal(signal.SIGINT, sigint_handler)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -21,7 +83,8 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from yaml import safe_load
 from tqdm import tqdm
 
-from models import HyperFixer
+from models import MambaFixer
+from models.components.color_space import yuv_to_rgb
 from losses.composite import CompositeLoss
 from utils.console import console
 from utils.dataset import create_dataloader
@@ -121,40 +184,43 @@ def _cache_one_video(args: tuple) -> str:
     return f'cached {Path(video_path).name} ({len(raw_frames)} frames)'
 
 
-def warm_blosc_cache(config):
-    """Pre-decode videos to BloscCache before training starts.
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
-    Respects ``data.limit`` — only warms the first N videos.
-    After warming, workers read BloscCache only (fast, ~50ms per video).
+def clear_dataset_cache(dataset_path):
+    cache_root = Path(dataset_path) / 'cache_yuv'
+    if cache_root.exists():
+        console.info(f"Clearing cache directory: {cache_root}")
+        try:
+            shutil.rmtree(str(cache_root))
+            console.success(f"Successfully cleared cache: {cache_root}")
+        except Exception as e:
+            console.error(f"Failed to clear cache {cache_root}: {e}")
 
-    Set ``data.warm_cache: false`` to skip entirely.
-    """
-    if not config['data'].get('warm_cache', True):
-        console.info('Skipping cache warming (warm_cache: false)')
+def warm_blosc_cache(config, target_dataset_path=None):
+    if not config['dataset'].get('warm_cache_on_startup', True):
+        console.info('Skipping cache warming')
         return
 
-    datasets = config['data']['datasets']
-    data_type = config['data'].get('data_type', 'compressed')
-    limit = config['data'].get('limit', 0)
+    datasets = config['dataset']['dataset_paths']
+    if target_dataset_path is not None:
+        datasets = [str(target_dataset_path)]
+        
+    limit = config['dataset'].get('limit', 0) # Fallback for CLI limit
 
     todos = []
     for ds_root_str in datasets:
         ds_root = Path(ds_root_str)
-        cache_root = ds_root / 'cache'
+        cache_root = ds_root / 'cache_yuv'
         hr_dir = ds_root / 'HR'
 
-        # Build sorted list of video names (same order as dataset inventory).
         video_names = sorted(f.stem for f in hr_dir.glob('*.mp4'))
         if limit > 0:
             video_names = video_names[:limit]
 
-        variant_dirs = sorted(
-            d for d in ds_root.iterdir()
-            if d.is_dir() and d.name not in ('HR', 'cache')
-        ) if data_type == 'compressed' else [ds_root / 'HR']
-
-        # Only warm HR + each variant for the limited set of names.
+        # Targets include HR and all other variant directories
+        variant_dirs = [d for d in ds_root.iterdir() if d.is_dir() and d.name not in ('HR', 'cache_yuv')]
         targets = [hr_dir] + variant_dirs
+        
         for vd in targets:
             for name in video_names:
                 mp4 = vd / f'{name}.mp4'
@@ -164,48 +230,124 @@ def warm_blosc_cache(config):
                         todos.append((str(mp4), str(cache_root)))
 
     if not todos:
-        console.success('BloscCache already warm — no videos need decoding')
+        console.success(f"BloscCache already warm for {[Path(d).name for d in datasets]}")
         return
 
-    console.info(f'Warming BloscCache: {len(todos)} files to decode...')
+    console.info(f"Warming BloscCache for {[Path(d).name for d in datasets]}: {len(todos)} files (Sequential mode for 16GB RAM)...")
+    # Force 1 worker to avoid OOM on 16GB RAM machines when processing 4K
+    max_workers = 1 
     t0 = time.perf_counter()
-    done = 0
-    for todo in todos:
-        done += 1
-        status = _cache_one_video(todo)
-        elapsed = time.perf_counter() - t0
-        rate = done / elapsed if elapsed > 0 else 0
-        remaining = (len(todos) - done) / rate if rate > 0 else 0
-        console.info(f'  [{done}/{len(todos)}] {status}  '
-                      f'{elapsed:.0f}s elapsed  {remaining:.0f}s remaining')
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_cache_one_video, todo) for todo in todos]
+        for future in tqdm(as_completed(futures), total=len(todos), desc="Warming Cache", unit="vid"):
+            try:
+                future.result()
+            except Exception as e:
+                console.error(f'Failed to cache video: {e}')
 
-    elapsed = time.perf_counter() - t0
-    console.success(f'Cache warming complete ({elapsed:.1f}s)')
+    console.success(f"Cache warming complete ({time.perf_counter() - t0:.1f}s)")
 
 
-def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None, batch_times=None):
+def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None, batch_times=None, run_dir=None):
+    global EXIT_FLAG
     model.train()
     total_loss = 0.0
     n_batches = len(loader)
-    has_temp = config['loss'].get('temporal', 0) > 0
-    grad_accum = config['training'].get('gradient_accumulation_steps', 1)
-    clip_grad = config['training']['clip_grad']
-    bs = config['training']['batch_size']
+    
+    training_cfg = config['training_settings']
+    model_cfg = config['model_architecture']
+    dataset_cfg = config['dataset']
+    
+    grad_accum = training_cfg.get('gradient_accumulation_steps', 1)
+    clip_grad = training_cfg['gradient_clipping_threshold']
+    bs = training_cfg['batch_size']
+    
+    model_name = model_cfg.get('model_name', 'hyper_fixer')
+    is_mamba = model_name == 'mamba_fixer'
+    sequential = dataset_cfg.get('sequential_mode', False) and is_mamba
+    center_idx = dataset_cfg['num_frames'] // 2
+    prev_video_id = -1
+    expert_counts = torch.zeros(model_cfg.get('num_experts', 42), device='cpu')
 
-    pbar = tqdm(total=n_batches, desc="Training", unit="batch", leave=False,
-                miniters=10)
+    if is_mamba:
+        model.reset_state(bs or 1, device)
+
+    pbar = tqdm(total=n_batches, desc="Training", unit="batch", leave=False, miniters=10)
     t_batch_start = time.perf_counter()
     optimizer.zero_grad()
+    
     for batch_idx, batch in enumerate(loader):
+        if run_dir:
+            pause_file = run_dir / '.pause'
+            exit_file = run_dir / '.exit'
+            
+            if exit_file.exists():
+                console.warning(f"\nExit signal detected (.exit file found in {run_dir}). Stopping gracefully...")
+                EXIT_FLAG = True
+                try:
+                    exit_file.unlink()
+                except Exception:
+                    pass
+            
+            was_paused = False
+            first_pause_msg = True
+            while pause_file.exists() and not EXIT_FLAG:
+                was_paused = True
+                if first_pause_msg:
+                    console.warning(f"\nTraining paused (.pause file found in {run_dir}). Delete the file to resume.")
+                    first_pause_msg = False
+                time.sleep(1.0)
+                if exit_file.exists():
+                    console.warning(f"\nExit signal detected during pause (.exit file found in {run_dir}). Stopping gracefully...")
+                    EXIT_FLAG = True
+                    try:
+                        exit_file.unlink()
+                    except Exception:
+                        pass
+            
+            if was_paused and not EXIT_FLAG:
+                console.success("Resuming training...")
+
+        if EXIT_FLAG:
+            break
         data_end = time.perf_counter()
         lr = batch['lr_frames'].to(device, non_blocking=True)
         hr = batch['hr'].to(device, non_blocking=True)
 
         with torch.amp.autocast(device_type='cuda', enabled=scaler is not None):
-            pred_cur = model(lr[:, 1], lr[:, 2], lr[:, 3])
-            pred_next = model(lr[:, 2], lr[:, 3], lr[:, 4]) if has_temp else None
-            loss_dict = criterion(pred_cur, hr, pred_next=pred_next)
-            loss = loss_dict['total'] / grad_accum
+            if sequential:
+                video_id = batch.get('video_id', -1)
+                if video_id != prev_video_id:
+                    model.reset_state(lr.size(0), device)
+                prev_video_id = video_id
+
+                for t in range(lr.size(1)):
+                    if t == center_idx:
+                        pred = model(lr[:, t].to(memory_format=torch.channels_last), pre_ictcp=False)
+                        loss_dict = criterion(pred, hr.to(memory_format=torch.channels_last))
+                        loss_dict['moe'] = model._balancing_loss * 0.1
+                        loss_dict['total'] = loss_dict['total'] + loss_dict['moe']
+                        loss = loss_dict['total'] / grad_accum
+                    else:
+                        with torch.no_grad():
+                            model(lr[:, t].to(memory_format=torch.channels_last), ssm_only=True, pre_ictcp=False)
+                
+                if hasattr(model, '_last_expert_idx'):
+                    expert_counts.index_add_(0, model._last_expert_idx.cpu(),
+                                             torch.ones_like(model._last_expert_idx, dtype=torch.float))
+                model._t_state = model._t_state.detach()
+                
+            else:
+                model.reset_state(lr.size(0), device)
+                pred = model(lr[:, center_idx].to(memory_format=torch.channels_last), pre_ictcp=False)
+                loss_dict = criterion(pred, hr.to(memory_format=torch.channels_last))
+                loss_dict['moe'] = model._balancing_loss * 0.1
+                loss_dict['total'] = loss_dict['total'] + loss_dict['moe']
+                loss = loss_dict['total'] / grad_accum
+                if hasattr(model, '_last_expert_idx'):
+                    expert_counts.index_add_(0, model._last_expert_idx.cpu(),
+                                             torch.ones_like(model._last_expert_idx, dtype=torch.float))
 
         if scaler is not None:
             scaler.scale(loss).backward()
@@ -242,23 +384,15 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     return total_loss / n_batches
 
 
-def _yuv_to_rgb(x: torch.Tensor) -> torch.Tensor:
-    """(B,3,H,W) normalized YUV [-1,1] → (B,3,H,W) normalized RGB [-1,1]."""
-    y = (x[:, 0:1] + 1) * 127.5
-    u_centered = (x[:, 1:2] + 1) * 127.5 - 128.0
-    v_centered = (x[:, 2:3] + 1) * 127.5 - 128.0
-    r = y + 1.402 * v_centered
-    g = y - 0.344 * u_centered - 0.714 * v_centered
-    b = y + 1.772 * u_centered
-    return torch.cat([r, g, b], dim=1) / 127.5 - 1.0
-
-
 @torch.no_grad()
-def validate(model, val_loader, device, max_samples=100):
+def validate(model, val_loader, device, max_samples=100, num_vmaf_samples=0):
     model.eval()
     total_psnr = 0.0
     total_ssim = 0.0
+    total_fpsnr = 0.0
     n = 0
+    n_vmaf = 0
+    is_mamba = isinstance(model, MambaFixer)
 
     for batch in val_loader:
         if n >= max_samples:
@@ -267,10 +401,18 @@ def validate(model, val_loader, device, max_samples=100):
         lr = batch['lr_frames'].to(device, non_blocking=True)
         hr = batch['hr'].to(device, non_blocking=True)
 
-        pred = model(lr[:, 1], lr[:, 2], lr[:, 3])
+        if is_mamba:
+            model.reset_state(lr.size(0), device)
+            # Validation uses pre_ictcp=False because Dataloader provides YUV
+            pred = model(lr[:, lr.size(1)//2].to(memory_format=torch.channels_last), pre_ictcp=False)
+        else:
+            center = lr.size(1)//2
+            pred = model(lr[:, center-1], lr[:, center], lr[:, center+1])
 
-        pred_rgb = _yuv_to_rgb(pred)
-        hr_rgb = _yuv_to_rgb(hr)
+        # CompositeLoss expects pred/hr in normalized YUV range.
+        # But PSNR/SSIM calculation needs RGB.
+        pred_rgb = yuv_to_rgb(pred)
+        hr_rgb = yuv_to_rgb(hr)
 
         batch_size = pred.size(0)
         take = min(batch_size, max_samples - n)
@@ -278,65 +420,70 @@ def validate(model, val_loader, device, max_samples=100):
         total_ssim += calculate_ssim_batch(pred_rgb[:take], hr_rgb[:take]).sum().item()
         n += take
 
-    return total_psnr / max(1, n), total_ssim / max(1, n)
+        if num_vmaf_samples > 0 and n_vmaf < num_vmaf_samples:
+            from utils.vmaf import compute_vmaf
+            for b in range(min(take, num_vmaf_samples - n_vmaf)):
+                total_fpsnr += compute_vmaf(pred[b:b+1], hr[b:b+1])
+                n_vmaf += 1
+
+    avg_vmaf = total_fpsnr / max(1, n_vmaf)
+    return total_psnr / max(1, n), total_ssim / max(1, n), avg_vmaf
 
 
 def main():
+    global EXIT_FLAG
     start_io_worker()
     args = parse_args()
     config = safe_load(open(args.config))
 
-    seed = args.seed or config.get('seed')
+    seed = args.seed or config.get('random_seed')
     if seed:
         set_seed(seed)
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     console.info(f'Using device: {device}')
 
-    # ── GPU speed tuning ──
     if device.type == 'cuda':
         torch.backends.cudnn.benchmark = True
         torch.set_float32_matmul_precision('high')
-        console.info('cudnn.benchmark + TF32 enabled')
 
-    train_cfg = config['training']
+    model_cfg = config['model_architecture']
+    training_cfg = config['training_settings']
+    dataset_cfg = config['dataset']
+    logging_cfg = config['logging_settings']
 
-    model_name = config['model'].get('name', 'av1_vsr')
+    model_name = model_cfg.get('model_name', 'hyper_fixer')
     console.info(f'Model: {model_name}')
 
     if model_name == 'hyper_fixer':
-        model = HyperFixer(
-            n_features=config['model']['n_features'],
-            n_blocks=config['model']['n_blocks'],
-            latent=config['model'].get('latent', 512),
-        ).to(device)
-    else:
-        model = AV1VSR(
-            in_channels=3,
-            n_features=config['model']['n_features'],
-            n_blocks=config['model']['n_blocks'],
-            scales=config['model'].get('scales', [1, 2, 4]),
-        ).to(device)
+        # Removed
+        pass
+    elif model_name == 'mamba_fixer':
+        model = MambaFixer(
+            num_features=model_cfg.get('num_features', 16),
+            state_dimension=model_cfg.get('state_dimension', 32),
+            num_features_stream=model_cfg.get('num_features_stream', 2),
+            num_experts=model_cfg.get('num_experts', 42),
+            dilation_rates=model_cfg.get('dilation_rates', [1, 2, 4, 32]),
+        ).to(device, memory_format=torch.channels_last)
 
-    # torch.compile speeds up forward/backward significantly on GPU.
-    if train_cfg.get('compile', False):
+    if training_cfg.get('enable_torch_compile', False):
         console.info('Using torch.compile')
         model = torch.compile(model, mode='max-autotune')
 
-    criterion = CompositeLoss(config['loss'], device=device)
+    criterion = CompositeLoss(config['loss_weights'], device=device)
 
     optimizer = optim.AdamW(
         model.parameters(),
-        lr=train_cfg['lr'],
-        weight_decay=train_cfg['weight_decay'],
-        betas=(train_cfg['beta1'], train_cfg['beta2']),
+        lr=training_cfg['learning_rate'],
+        weight_decay=training_cfg['weight_decay'],
+        betas=(training_cfg['adam_beta1'], training_cfg['adam_beta2']),
         fused=device.type == 'cuda',
     )
 
-    n_epochs = train_cfg['epochs']
-    scheduler = CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=train_cfg['lr_min'])
-
-    scaler = torch.amp.GradScaler('cuda') if train_cfg.get('amp', False) and device.type == 'cuda' else None
+    n_epochs = training_cfg['num_epochs']
+    scheduler = CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=training_cfg['min_learning_rate'])
+    scaler = torch.amp.GradScaler('cuda') if training_cfg.get('use_mixed_precision', False) and device.type == 'cuda' else None
 
     start_epoch = 0
     if args.resume:
@@ -346,157 +493,188 @@ def main():
         if ckpt.get('scheduler_state_dict'):
             scheduler.load_state_dict(ckpt['scheduler_state_dict'])
         start_epoch = ckpt['epoch'] + 1
-        console.info(f'Resumed from epoch {start_epoch}')
     elif args.pretrained:
         ckpt = torch.load(args.pretrained, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt)
-        console.info(f'Loaded pretrained weights from {args.pretrained}')
 
-    data_type = config['data'].get('data_type', 'compressed')
+    multiple_datasets = len(dataset_cfg['dataset_paths']) > 1
+    train_loader = None
+    val_loader = None
 
-    # ── Pre-decode all videos to BloscCache so workers never hit PyAV ──
-    warm_blosc_cache(config)
+    if not multiple_datasets:
+        warm_blosc_cache(config)
+        train_loader = create_dataloader(
+            datasets=dataset_cfg['dataset_paths'],
+            batch_size=training_cfg['batch_size'],
+            patch_size=dataset_cfg['patch_size'],
+            frames=dataset_cfg['num_frames'],
+            workers=dataset_cfg['num_workers'],
+            is_train=True,
+            cache_max_videos=dataset_cfg.get('max_videos_in_cache'),
+            clip_repeat=dataset_cfg.get('clip_repeat_factor', 1),
+            sequential=dataset_cfg.get('sequential_mode', False),
+        )
+        val_loader = create_dataloader(
+            datasets=dataset_cfg['dataset_paths'],
+            batch_size=dataset_cfg.get('validation_batch_size', 2),
+            patch_size=dataset_cfg['patch_size'],
+            frames=dataset_cfg['num_frames'],
+            workers=dataset_cfg.get('validation_num_workers', 2),
+            is_train=False,
+            cache_max_videos=dataset_cfg.get('max_videos_in_cache'),
+        )
 
-    train_loader = create_dataloader(
-        datasets=config['data']['datasets'],
-        batch_size=train_cfg['batch_size'],
-        patch_size=config['data']['patch_size'],
-        frames=config['data']['frames'],
-        workers=config['data'].get('workers', 4),
-        is_train=True,
-        data_type=data_type,
-        cache_max_videos=config['data'].get('cache_max_videos'),
-        prefetch_factor=config['data'].get('prefetch_factor'),
-        shuffle_variants=config['data'].get('shuffle_variants', False),
-        clip_repeat=config['data'].get('clip_repeat', 1),
-    )
-
-    limit = args.limit or config['data'].get('limit', 0)
-    if limit > 0:
-        train_loader.dataset.videos = train_loader.dataset.videos[:limit]
-        console.info(f'Limited to {len(train_loader.dataset.videos)} videos')
-
-    val_loader = create_dataloader(
-        datasets=config['data']['datasets'],
-        batch_size=config['data'].get('val_batch_size', 16),
-        patch_size=config['data']['patch_size'],
-        frames=config['data']['frames'],
-        workers=config['data'].get('val_workers', config['data'].get('workers', 4)),
-        is_train=False,
-        data_type=data_type,
-        cache_max_videos=config['data'].get('cache_max_videos'),
-        prefetch_factor=config['data'].get('prefetch_factor'),
-    )
-
-    console.info(f'Training: {data_type} data, {n_epochs} epochs')
-    console.info(f'LR: {train_cfg["lr"]}, batch_size: {train_cfg["batch_size"]}')
-    console.info(f'Train samples: {len(train_loader.dataset)}')
-
-    best_psnr = -float('inf')
-    prev_loss = None
-    prev_psnr = None
-    prev_ssim = None
-    up_streak = 0
-    output_dir = Path(config['output_dir'])
+    global RUN_DIR
+    output_dir = Path(config['output_directory'])
     output_dir.mkdir(parents=True, exist_ok=True)
-
     existing = sorted(output_dir.glob('run_*'))
     next_id = max(int(d.name.split('_')[1]) for d in existing) + 1 if existing else 1
     run_dir = output_dir / f'run_{next_id:03d}'
     run_dir.mkdir()
-    console.info(f'Run: {run_dir}')
+    RUN_DIR = run_dir
 
-    metrics_path = run_dir / 'metrics.json'
-    metrics = []
-    save_interval = config['logging'].get('save_interval', 5)
-    timing_path = run_dir / 'batch_timing.json'
-    all_batch_times = []
+    console.info(f"Training run directory created: {run_dir}")
+    console.info(f"To PAUSE training: press Ctrl+C and choose [p], or create file '{run_dir}/.pause'")
+    console.info(f"To EXIT gracefully: press Ctrl+C and choose [s], or create file '{run_dir}/.exit'")
 
     try:
         for epoch in range(start_epoch, n_epochs):
-            batch_times = []
-            train_loss = train_epoch(model, train_loader, criterion, optimizer, device, config, scaler, batch_times)
-            all_batch_times.append(batch_times)
+            if run_dir:
+                pause_file = run_dir / '.pause'
+                exit_file = run_dir / '.exit'
+                
+                if exit_file.exists():
+                    console.warning(f"\nExit signal detected (.exit file found in {run_dir}). Stopping gracefully...")
+                    EXIT_FLAG = True
+                    try:
+                        exit_file.unlink()
+                    except Exception:
+                        pass
+                
+                was_paused = False
+                first_pause_msg = True
+                while pause_file.exists() and not EXIT_FLAG:
+                    was_paused = True
+                    if first_pause_msg:
+                        console.warning(f"\nTraining paused (.pause file found in {run_dir}). Delete the file to resume.")
+                        first_pause_msg = False
+                    time.sleep(1.0)
+                    if exit_file.exists():
+                        console.warning(f"\nExit signal detected during pause (.exit file found in {run_dir}). Stopping gracefully...")
+                        EXIT_FLAG = True
+                        try:
+                            exit_file.unlink()
+                        except Exception:
+                            pass
+                
+                if was_paused and not EXIT_FLAG:
+                    console.success("Resuming training...")
 
-            def _write_timing(path, data):
-                path.write_text(json.dumps(data, indent=2))
-            _IO_QUEUE.put((_write_timing, (timing_path, all_batch_times), {}))
+            if EXIT_FLAG:
+                save_checkpoint(model, optimizer, scheduler, max(0, epoch - 1), run_dir, output_dir)
+                console.warning(f"Training gracefully stopped. Saved checkpoint for epoch {max(0, epoch - 1)}.")
+                break
+
+            if multiple_datasets:
+                epoch_loss = 0.0
+                total_batches = 0
+                for ds_path in dataset_cfg['dataset_paths']:
+                    if run_dir:
+                        pause_file = run_dir / '.pause'
+                        exit_file = run_dir / '.exit'
+                        if exit_file.exists() or EXIT_FLAG:
+                            EXIT_FLAG = True
+                            break
+                        was_paused = False
+                        first_pause_msg = True
+                        while pause_file.exists() and not EXIT_FLAG:
+                            was_paused = True
+                            if first_pause_msg:
+                                console.warning(f"\nTraining paused (.pause file found in {run_dir}). Delete the file to resume.")
+                                first_pause_msg = False
+                            time.sleep(1.0)
+                            if exit_file.exists():
+                                EXIT_FLAG = True
+                        if was_paused and not EXIT_FLAG:
+                            console.success("Resuming training...")
+                    
+                    if EXIT_FLAG:
+                        break
+
+                    warm_blosc_cache(config, target_dataset_path=ds_path)
+                    
+                    ds_loader = create_dataloader(
+                        datasets=[ds_path],
+                        batch_size=training_cfg['batch_size'],
+                        patch_size=dataset_cfg['patch_size'],
+                        frames=dataset_cfg['num_frames'],
+                        workers=dataset_cfg['num_workers'],
+                        is_train=True,
+                        cache_max_videos=dataset_cfg.get('max_videos_in_cache'),
+                        clip_repeat=dataset_cfg.get('clip_repeat_factor', 1),
+                        sequential=dataset_cfg.get('sequential_mode', False),
+                        persistent_workers=False,
+                    )
+                    
+                    ds_loss = train_epoch(model, ds_loader, criterion, optimizer, device, config, scaler, run_dir=run_dir)
+                    epoch_loss += ds_loss * len(ds_loader)
+                    total_batches += len(ds_loader)
+                    
+                    del ds_loader
+                    clear_dataset_cache(ds_path)
+                
+                train_loss = epoch_loss / total_batches if total_batches > 0 else 0.0
+            else:
+                train_loss = train_epoch(model, train_loader, criterion, optimizer, device, config, scaler, run_dir=run_dir)
 
             scheduler.step()
 
-            val_psnr = None
-            val_ssim = None
-            is_new_best = False
+            if EXIT_FLAG:
+                save_checkpoint(model, optimizer, scheduler, epoch, run_dir, output_dir)
+                console.warning(f"Training gracefully stopped. Saved checkpoint for epoch {epoch}.")
+                break
 
-            if epoch % config['logging'].get('val_interval', 1) == 0:
-                # Avoid the heavy CUDA cache flush that causes periodic stalls.
-                if config['logging'].get('empty_cuda_cache', False):
+            if epoch % logging_cfg.get('validation_interval', 1) == 0:
+                if logging_cfg.get('empty_cuda_cache_on_validation', False):
                     torch.cuda.empty_cache()
-                val_psnr, val_ssim = validate(model, val_loader, device)
+                
+                if multiple_datasets:
+                    total_psnr = 0.0
+                    total_ssim = 0.0
+                    total_vmaf = 0.0
+                    val_datasets = dataset_cfg['dataset_paths']
+                    for ds_path in val_datasets:
+                        if EXIT_FLAG:
+                            break
+                        warm_blosc_cache(config, target_dataset_path=ds_path)
+                        ds_val_loader = create_dataloader(
+                            datasets=[ds_path],
+                            batch_size=dataset_cfg.get('validation_batch_size', 2),
+                            patch_size=dataset_cfg['patch_size'],
+                            frames=dataset_cfg['num_frames'],
+                            workers=dataset_cfg.get('validation_num_workers', 2),
+                            is_train=False,
+                            cache_max_videos=dataset_cfg.get('max_videos_in_cache'),
+                            persistent_workers=False,
+                        )
+                        psnr, ssim, vmaf = validate(model, ds_val_loader, device, num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
+                        total_psnr += psnr
+                        total_ssim += ssim
+                        total_vmaf += vmaf
+                        del ds_val_loader
+                        clear_dataset_cache(ds_path)
+                    
+                    psnr = total_psnr / len(val_datasets)
+                    ssim = total_ssim / len(val_datasets)
+                    vmaf = total_vmaf / len(val_datasets)
+                else:
+                    psnr, ssim, vmaf = validate(model, val_loader, device, num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
+                
+                console.info(f'Epoch {epoch}: loss={train_loss:.4f} | psnr={psnr:.2f} | ssim={ssim:.4f}')
 
-                def arrow(curr, prev):
-                    if prev is None:
-                        return '->'
-                    return '^' if curr > prev else 'v'
-
-                l_arrow = arrow(train_loss, prev_loss)
-                p_arrow = arrow(val_psnr, prev_psnr)
-                s_arrow = arrow(val_ssim, prev_ssim)
-
-                flags = []
-                if epoch == 0:
-                    flags.append('first')
-                is_new_best = val_psnr > best_psnr
-                if is_new_best:
-                    best_psnr = val_psnr
-                    flags.append('best')
-                if prev_psnr is not None:
-                    diff = val_psnr - prev_psnr
-                    if diff < -2.0:
-                        flags.append('CRASH')
-                    elif diff < -0.5:
-                        flags.append('WARN')
-                if val_psnr >= 20:
-                    flags.append('GOOD')
-                if up_streak >= 3:
-                    flags.append('STREAK')
-
-                flag_str = ' | ' + ' '.join(flags) if flags else ''
-                console.info(f'Epoch {epoch:3d}:  {l_arrow} loss={train_loss:.4f}  |  '
-                             f'{p_arrow} psnr={val_psnr:5.2f}  |  '
-                             f'{s_arrow} ssim={val_ssim:.4f}{flag_str}')
-
-                prev_loss = train_loss
-                prev_psnr = val_psnr
-                prev_ssim = val_ssim
-
-            save_checkpoint(model, optimizer, scheduler, epoch, run_dir, output_dir,
-                            is_best=is_new_best if val_psnr is not None else False)
-
-            if save_interval > 0 and epoch % save_interval == 0 and epoch > 0:
-                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                epoch_path = run_dir / f'epoch_{epoch:03d}_{ts}.pth'
-                state = {
-                    'epoch': epoch,
-                    'model_state_dict': {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
-                    'optimizer_state_dict': {k: v.detach().cpu().clone() if isinstance(v, torch.Tensor) else v
-                                             for k, v in optimizer.state_dict().items()},
-                    'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                }
-                _IO_QUEUE.put((torch.save, (state, str(epoch_path)), {}))
-
-            metrics.append({"epoch": epoch, "loss": round(train_loss, 4),
-                            "psnr": round(val_psnr, 4) if val_psnr is not None else None,
-                            "ssim": round(val_ssim, 4) if val_ssim is not None else None})
-
-            def _write_metrics(path, data):
-                path.write_text(json.dumps(data, indent=2))
-            _IO_QUEUE.put((_write_metrics, (metrics_path, metrics), {}))
+            save_checkpoint(model, optimizer, scheduler, epoch, run_dir, output_dir)
     finally:
         stop_io_worker()
-
-    console.success('Training complete.')
-
 
 if __name__ == '__main__':
     main()

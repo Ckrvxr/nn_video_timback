@@ -1,0 +1,65 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+try:
+    from mamba_ssm import Mamba as MambaSSM
+    HAS_MAMBA = True
+except ImportError:
+    HAS_MAMBA = False
+
+from .fast_ssm import FastSSM
+
+
+class SimpleSSM(nn.Module):
+    def __init__(self, d_model: int = 16, d_state: int = 16):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
+        self.fc = nn.Linear(d_model + d_state, d_model)
+        self.state_proj = nn.Linear(d_model, d_state)
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.Tensor, state: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        B, L, D = x.shape
+        if state is None:
+            state = x.new_zeros(B, self.d_state)
+        out = []
+        for t in range(L):
+            inp = torch.cat([x[:, t], state], dim=-1)
+            h = self.fc(inp)
+            out.append(h)
+            state = self.state_proj(h)
+        out = torch.stack(out, dim=1)
+        out = self.norm(out)
+        return out, state
+
+
+class SSMBlock(nn.Module):
+    def __init__(self, d_model: int = 16, d_state: int = 16):
+        super().__init__()
+        if HAS_MAMBA:
+            self.ssm = MambaSSM(d_model=d_model, d_state=d_state)
+        else:
+            self.ssm = FastSSM(d_model, d_state)
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.Tensor, state: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        if HAS_MAMBA:
+            out = self.ssm(x)
+            new_state = out[:, -1]
+        else:
+            out, new_state = self.ssm(x, state)
+        out = self.norm(out)
+        return out, new_state
+
+
+class SequenceProcessor(nn.Module):
+    def __init__(self, d_model: int = 16, d_state: int = 16):
+        super().__init__()
+        self.ssm = SSMBlock(d_model, d_state)
+
+    def forward(self, x: torch.Tensor, h_state: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        out, new_state = self.ssm(x, h_state)
+        pooled = out.mean(dim=1)
+        return pooled, new_state

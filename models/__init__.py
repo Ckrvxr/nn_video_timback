@@ -1,1 +1,1 @@
-from models.hyper_fixer import HyperFixer
+from .mamba_fixer import MambaFixer

@@ -54,3 +54,5 @@ htmlcov/
 tmp/
 temp/
 .playwright-mcp/
+trace.json
+trace_seq.json
