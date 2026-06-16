@@ -4,7 +4,9 @@ output_dir: runs/prod
 seed: 42
 
 data:
-  datasets: [./data/datasets/Takopii-no-Genza]
+  datasets: [
+             ./data/datasets/realisvideo-4k
+    ]
   patch_size: 512
   frames: 5
   val_batch_size: 2
@@ -14,8 +16,8 @@ data:
   warm_cache: true
   cache_max_videos: 2
   prefetch_factor: 1
-  shuffle_variants: false
-  clip_repeat: 10
+  shuffle_variants: true
+  clip_repeat: 1
 
 model:
   name: hyper_fixer
@@ -37,41 +39,15 @@ training:
   compile: false
 
 loss:
-  # ──────────────────────────────────────────────
-  # 1. Overall Reconstruction — 像素级重建保真度
-  # ──────────────────────────────────────────────
   charbonnier: 1.0
-
-  # ──────────────────────────────────────────────
-  # 2. Edge Blurring — AV1 低码率高频丢失, 边缘变糊
-  #    Sobel: 显式惩罚边缘梯度偏差
-  #    MS-SSIM: 保持局部结构/对比度
-  # ──────────────────────────────────────────────
-  sobel_gradient: 0.03
   ms_ssim: 0.1
-
-  # ──────────────────────────────────────────────
-  # 3. Banding / Contouring — 平滑渐变量化断层
-  #    Laplacian: 捕捉二阶微分(色带等于一阶平坦但二阶突变)
-  # ──────────────────────────────────────────────
   laplacian: 0.02
+  temporal_consistency: 0.02
 
-  # ──────────────────────────────────────────────
-  # 4. Color Shift / Chroma Bleeding — 色度量化偏移
-  #    Gaussian Soft Histogram: 全通道分布匹配
-  # ──────────────────────────────────────────────
-  gaussian_soft_histogram: 0.01
+  # gaussian_soft_histogram: 0.01
+  # sobel_gradient: 0.01
+  # total_variation: 0.01
 
-  # ──────────────────────────────────────────────
-  # 5. Quantization Noise — 平坦区颗粒噪声
-  #    Total Variation: 平滑先验, 抑制高频噪点
-  # ──────────────────────────────────────────────
-  total_variation: 0.001
-
-  # ──────────────────────────────────────────────
-  # 6. Temporal Flickering — 帧间量化不一致导致的闪烁
-  # ──────────────────────────────────────────────
-  temporal_consistency: 0.1
 
 logging:
   log_interval: 50

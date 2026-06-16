@@ -1,7 +1,7 @@
 [workspace]
 authors = ["Ckrvxr"]
 channels = ["conda-forge"]
-name = "video_timback"
+name = "hyperfixer"
 platforms = ["osx-arm64", "linux-64", "win-64"]
 version = "0.1.0"
 
@@ -12,25 +12,13 @@ cuda = "12"
 python = ">=3.11,<3.13"
 numpy = "*"
 opencv = "*"
-pillow = "*"
-scipy = ">=1.15,<1.17"
 ffmpeg = "*"
-tensorboard = "*"
 pyyaml = "*"
 tqdm = "*"
-h5py = "*"
-scikit-image = "*"
 av = ">=15.1.0,<18"
 python-blosc = ">=1.11.4,<2"
-pyzstd = ">=0.19.1,<0.20"
-python-blosc2 = ">=4.1.2,<5"
 
 [pypi-dependencies]
-wandb = "*"
-lpips = "*"
-onnx = "*"
-huggingface-hub = "*"
-rich = ">=15.0.0, <16"
 loguru = "*"
 
 [target.osx-arm64.dependencies]
@@ -49,9 +37,6 @@ torchvision = "*"
 cuda-version = "12.6.*"
 svt-av1 = "*"
 
-[target.win-64.pypi-dependencies]
-onnxruntime-gpu = ">=1.26.0, <2"
-
 [feature.dev.dependencies]
 pytest = "*"
 ruff = "*"
@@ -64,13 +49,10 @@ jupyter = "*"
 #  🧪 Test — 快速迭代测试
 # ═══════════════════════════════════════════
 test-train = "python scripts/train.py --config configs/test.yaml"
-test-val   = "python scripts/run_validate.py --config configs/test.yaml --video data/raw_videos/test_clip/test_clip_1.mp4 --checkpoint runs/test/best.pth --crf 40 --preset 10 --output runs/validate/val_test.mp4 --tile-size 960 --tile-overlap 0 --scale 1"
-
 # ═══════════════════════════════════════════
-#  🏭 Prod — 生产训练与验证
+#  🏭 Prod — 生产训练
 # ═══════════════════════════════════════════
 prod-train = "python train.py --config configs/prod.yaml"
-prod-val   = "python scripts/run_validate.py --config configs/prod.yaml --video data/raw_videos/test_clip/test_clip_1.mp4 --checkpoint runs/prod/best.pth --crf 40 --preset 10 --output runs/validate/val_prod.mp4 --tile-size 960 --tile-overlap 0 --scale 1"
 
 # ═══════════════════════════════════════════
 #  🛠  Tools — 数据生成、lint、测试
@@ -82,15 +64,7 @@ prepare-realisvideo   = "python data/raw_videos/realisvideo-4k/realisvideo-4k_ds
 prepare-takopii          = "python data/raw_videos/Takopii-no-Genzai/Takopii-no-Genzai_dsg.py --max-episodes 1 --workers 2"
 lint         = "ruff check ."
 test-all     = "pytest tests/ -v"
-bench = "python scripts/benchmark.py speed --config configs/prod.yaml --n-batches 10 --n-steps 10 && python scripts/benchmark.py breakdown --config configs/prod.yaml && python scripts/benchmark.py epoch --config configs/prod.yaml"
-bench-infer = "python scripts/benchmark.py infer-latency --config configs/test.yaml"
 
-# ═══════════════════════════════════════════
-#  🚀  Inference — 推理与导出
-# ═══════════════════════════════════════════
-infer       = "python inference.py --input video.mp4 --output out.mp4 --scale 4"
-infer-1x    = "python inference.py --input video.mp4 --output out.mp4 --scale 1"
-export-onnx = "python scripts/export_onnx.py --checkpoint runs/test/best.pth"
 
 
 [environments]

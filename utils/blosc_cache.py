@@ -68,37 +68,4 @@ class BloscCache:
             f.write(np.array([h, w, n_frames], dtype=np.uint16).tobytes())
             f.write(compressed)
 
-    def put(self, video_path: str | Path, frames: list[np.ndarray]):
-        """Convert YUV444 frames (H,W,3) to YUV420, then store as YYYYY-UUUUU-VVVVV."""
-        cp = self.cache_path(video_path)
-        cp.parent.mkdir(parents=True, exist_ok=True)
-        h, w = frames[0].shape[:2]
-        n_frames = len(frames)
-        n = h * w
-        n_uv = (h // 2) * (w // 2)
 
-        y_rows = []
-        u_rows = []
-        v_rows = []
-        for f in frames:
-            y_rows.append(f[:, :, 0].ravel())
-            u = cv2.resize(f[:, :, 1], (w // 2, h // 2),
-                           interpolation=self.uv_interp).ravel()
-            v = cv2.resize(f[:, :, 2], (w // 2, h // 2),
-                           interpolation=self.uv_interp).ravel()
-            u_rows.append(u)
-            v_rows.append(v)
-
-        y_all = np.concatenate(y_rows)
-        u_all = np.concatenate(u_rows)
-        v_all = np.concatenate(v_rows)
-        arr = np.concatenate([y_all, u_all, v_all])
-
-        try:
-            compressed = blosc.pack_array(
-                arr, cname=self.cname, clevel=self.clevel, shuffle=blosc.SHUFFLE)
-        except Exception as e:
-            raise RuntimeError(f'Cache compress failed: {e}  file: {cp}') from e
-        with open(cp, 'wb') as f:
-            f.write(np.array([h, w, n_frames], dtype=np.uint16).tobytes())
-            f.write(compressed)

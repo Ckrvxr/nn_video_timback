@@ -41,15 +41,6 @@ class HyperFixer(nn.Module):
 
         return self._backbone(f_prev, f_cur, f_next, pu_cur)
 
-    def forward_cached(
-        self,
-        f_prev: torch.Tensor,
-        f_cur: torch.Tensor,
-        f_next: torch.Tensor,
-        skip_raw: torch.Tensor,
-    ) -> torch.Tensor:
-        return self._backbone(f_prev, f_cur, f_next, skip_raw)
-
     def _backbone(self, f_prev, f_cur, f_next, skip_raw):
         x = self.temporal_fusion(torch.cat([f_prev, f_cur, f_next], dim=1))
         x = self.hyper(x)
@@ -57,24 +48,3 @@ class HyperFixer(nn.Module):
         x = self.sca(x)
         x = x + self.global_residual(skip_raw)
         return self.recon(x)
-
-
-class FeatureRingCache:
-    def __init__(self, max_frames: int = 3, device: torch.device = None):
-        self.max_frames = max_frames
-        self.features = []
-        self.raw_skip = None
-        self.device = device
-
-    def push(self, feat: torch.Tensor, raw_skip: torch.Tensor):
-        self.features.append(feat)
-        self.raw_skip = raw_skip
-        if len(self.features) > self.max_frames:
-            self.features.pop(0)
-
-    @property
-    def is_warm(self) -> bool:
-        return len(self.features) == self.max_frames
-
-    def get_triple(self):
-        return self.features[-3], self.features[-2], self.features[-1]

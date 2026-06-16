@@ -16,13 +16,11 @@ import numpy as np
 import torch
 warnings.filterwarnings('ignore', message='Cannot set number of intraop threads')
 import torch.nn as nn
-from torch.nn import functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from yaml import safe_load
 from tqdm import tqdm
 
-from models.av1_vsr import AV1VSR
 from models import HyperFixer
 from losses.composite import CompositeLoss
 from utils.console import console
