@@ -386,7 +386,12 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
 
                 if scaler is not None:
                     scaler.scale(loss_adv).backward()
-                    scaler.unscale_(optimizer)
+                    # Manually unscale gradients for the second pass to avoid PyTorch's double-unscale assertion
+                    inv_scale = 1.0 / (scaler.get_scale() + 1e-8)
+                    for group in optimizer.param_groups:
+                        for p in group['params']:
+                            if p.grad is not None:
+                                p.grad.data.mul_(inv_scale)
                 else:
                     loss_adv.backward()
 
