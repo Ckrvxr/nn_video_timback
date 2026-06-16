@@ -44,6 +44,7 @@ loss_weights:
   laplacian: 0.5
   color_tight: 0.3
   temporal_consistency: 0.0
+  fft: 0.1
 
 logging_settings:
   checkpoint_save_interval: 1
