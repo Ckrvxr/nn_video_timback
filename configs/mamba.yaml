@@ -36,6 +36,8 @@ training_settings:
   use_mixed_precision: true
   gradient_accumulation_steps: 2
   enable_torch_compile: false
+  enable_sam: true
+  sam_rho: 0.05
 
 loss_weights:
   charbonnier: 1.0

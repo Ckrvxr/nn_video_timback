@@ -92,6 +92,7 @@ from utils.frame_cache import FrameCache
 from utils.blosc_cache import BloscCache
 from utils.video_loader import load_video_frames_raw
 from utils.metrics import calculate_psnr_batch, calculate_ssim_batch
+from utils.sam import SAM
 
 
 # Global background writer for checkpoints / metrics so that disk IO does not
@@ -269,6 +270,7 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     center_idx = dataset_cfg['num_frames'] // 2
     prev_video_id = -1
     expert_counts = torch.zeros(model_cfg.get('num_experts', 42), device='cpu')
+    use_sam = training_cfg.get('enable_sam', False)
 
     if is_mamba:
         model.reset_state(bs or 1, device)
@@ -315,7 +317,8 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
         lr = batch['lr_frames'].to(device, non_blocking=True)
         hr = batch['hr'].to(device, non_blocking=True)
 
-        with torch.amp.autocast(device_type='cuda', enabled=scaler is not None):
+        def run_forward():
+            nonlocal prev_video_id
             if sequential:
                 video_id = batch.get('video_id', -1)
                 if video_id != prev_video_id:
@@ -348,6 +351,17 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                 if hasattr(model, '_last_expert_idx'):
                     expert_counts.index_add_(0, model._last_expert_idx.cpu(),
                                              torch.ones_like(model._last_expert_idx, dtype=torch.float))
+            return loss, loss_dict
+
+        # Save initial Mamba state for the second pass of SAM
+        if use_sam and is_mamba and hasattr(model, '_t_state') and model._t_state is not None:
+            saved_state = model._t_state.clone()
+        else:
+            saved_state = None
+
+        # First pass
+        with torch.amp.autocast(device_type='cuda', enabled=scaler is not None):
+            loss, loss_dict = run_forward()
 
         if scaler is not None:
             scaler.scale(loss).backward()
@@ -356,15 +370,47 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
 
         is_last_accum = ((batch_idx + 1) % grad_accum == 0) or (batch_idx == n_batches - 1)
         if is_last_accum:
-            if scaler is not None:
-                scaler.unscale_(optimizer)
+            if use_sam:
+                # 1. SAM first step
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
+                optimizer.first_step(zero_grad=True)
+
+                # 2. Restore Mamba state for second pass
+                if saved_state is not None:
+                    model._t_state = saved_state.clone()
+
+                # 3. Second pass (on adversarial weights)
+                with torch.amp.autocast(device_type='cuda', enabled=scaler is not None):
+                    loss_adv, loss_dict_adv = run_forward()
+
+                if scaler is not None:
+                    scaler.scale(loss_adv).backward()
+                    scaler.unscale_(optimizer)
+                else:
+                    loss_adv.backward()
+
+                # Gradient clipping
                 nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
-                scaler.step(optimizer)
-                scaler.update()
+
+                # 4. SAM second step
+                optimizer.second_step(zero_grad=True)
+
+                # Update scaler scale factor if AMP is used
+                if scaler is not None:
+                    scaler.update()
+
             else:
-                nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
-                optimizer.step()
-            optimizer.zero_grad()
+                # Standard optimization step
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
+                    nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                    optimizer.step()
+                optimizer.zero_grad()
 
         batch_loss = loss_dict['total'].item()
         total_loss += batch_loss
@@ -473,13 +519,26 @@ def main():
 
     criterion = CompositeLoss(config['loss_weights'], device=device)
 
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=training_cfg['learning_rate'],
-        weight_decay=training_cfg['weight_decay'],
-        betas=(training_cfg['adam_beta1'], training_cfg['adam_beta2']),
-        fused=device.type == 'cuda',
-    )
+    use_sam = training_cfg.get('enable_sam', False)
+    if use_sam:
+        console.info("Using SAM (Sharpness-Aware Minimization) optimizer wrapper")
+        optimizer = SAM(
+            model.parameters(),
+            base_optimizer=optim.AdamW,
+            rho=training_cfg.get('sam_rho', 0.05),
+            lr=training_cfg['learning_rate'],
+            weight_decay=training_cfg['weight_decay'],
+            betas=(training_cfg['adam_beta1'], training_cfg['adam_beta2']),
+            fused=device.type == 'cuda',
+        )
+    else:
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=training_cfg['learning_rate'],
+            weight_decay=training_cfg['weight_decay'],
+            betas=(training_cfg['adam_beta1'], training_cfg['adam_beta2']),
+            fused=device.type == 'cuda',
+        )
 
     n_epochs = training_cfg['num_epochs']
     scheduler = CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=training_cfg['min_learning_rate'])
