@@ -53,10 +53,11 @@ class SAM(torch.optim.Optimizer):
     def second_step(self, zero_grad=False):
         for group in self.param_groups:
             for p in group["params"]:
-                if p.grad is None: 
-                    continue
-                # Restore the original parameters
-                p.data = self.state[p]["old_p"]
+                if p in self.state and "old_p" in self.state[p]:
+                    # Restore the original parameters
+                    p.data.copy_(self.state[p]["old_p"])
+                    # Delete the copy to free memory
+                    del self.state[p]["old_p"]
 
         # Step the base optimizer using the accumulated gradients at the adversarial point
         self.base_optimizer.step()
