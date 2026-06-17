@@ -48,7 +48,8 @@ def test_multi_dataset_sequential(
             'num_features': 64,
             'state_dimension': 32,
             'num_features_stream': 2,
-            'num_experts': 42,
+            'num_experts': 100,
+            'n_active': 4,
             'dilation_rates': [1, 2, 4, 32],
         },
         'training_settings': {

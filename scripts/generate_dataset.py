@@ -65,7 +65,7 @@ def _run_ffprobe(video_path: Path, args: list[str]) -> str:
     result = subprocess.run(
         ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
          '-of', 'csv=p=0'] + args + [str(video_path)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     return result.stdout.strip()
 
@@ -91,12 +91,11 @@ def probe_video(video_path: Path) -> tuple[float, int]:
 
     if total_frames == 0:
         out = _run_ffprobe(video_path,
-                           ['-count_packets',
-                            '-show_entries', 'stream=nb_read_packets'])
+                           ['-show_entries', 'format=duration'])
         try:
-            out = out.rstrip(',')
-            if out and out.isdigit():
-                total_frames = int(out)
+            if out and out.replace('.', '', 1).lstrip('-').isdigit():
+                dur = float(out)
+                total_frames = int(round(dur * fps))
         except Exception:
             pass
     return fps, total_frames
@@ -240,13 +239,14 @@ def process_video(video_path: Path, args) -> int:
 
     for seg_idx, start_frame in enumerate(starts):
         seg_name = f'{name}_seg{seg_idx}'
-        hr_path = hr_dir / f'{seg_name}.mp4'
+        hr_path = hr_dir / f'{seg_name}.mkv'
 
         if hr_path.exists() and not args.no_resume:
             segments_created += 1
             continue
 
         # Build filter chain: select + optional color conversion
+        seek_time = start_frame / fps
         select = f'select=between(n\\,{start_frame}\\,{start_frame + args.slice_frames - 1})'
         vf_parts = [select]
         if conv_filter:
@@ -257,6 +257,7 @@ def process_video(video_path: Path, args) -> int:
         hr_dir.mkdir(parents=True, exist_ok=True)
         hr_cmd = [
             'ffmpeg', '-y',
+            '-ss', f'{seek_time:.6f}',
             '-i', str(video_path),
             '-vf', vf_filter,
             '-vsync', '0',
@@ -267,7 +268,7 @@ def process_video(video_path: Path, args) -> int:
             '-frames:v', str(args.slice_frames),
             str(hr_path),
         ]
-        _ffmpeg(hr_cmd, f'HR {seg_name}', timeout=300)
+        _ffmpeg(hr_cmd, f'HR {seg_name}', timeout=600)
 
         # ── LR: re-encode HR with random codec + params ────────────
         encoder_pairs = [(e, ENCODER_WEIGHTS[e]) for e in args.encoders if e in ENCODER_WEIGHTS]
@@ -347,6 +348,7 @@ def process_video(video_path: Path, args) -> int:
                 ]
 
             variant_dir = output_dir / dir_name
+            variant_dir.mkdir(parents=True, exist_ok=True)
             lr_path = variant_dir / f'{seg_name}.mp4'
             if lr_path.exists() and not args.no_resume:
                 continue

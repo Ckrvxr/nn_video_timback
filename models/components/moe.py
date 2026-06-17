@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 
 class MoERouter(nn.Module):
-    def __init__(self, n_features: int = 16, n_experts: int = 42, stat_features: int = 6):
+    def __init__(self, n_features: int = 16, n_experts: int = 100, stat_features: int = 6):
         super().__init__()
         total_in = n_features + stat_features
         hidden_dim = max(16, total_in // 2)
@@ -15,21 +15,22 @@ class MoERouter(nn.Module):
         )
         self.n_experts = n_experts
 
-    def forward(self, z_t: torch.Tensor, ictcp: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, z_t: torch.Tensor, ictcp: torch.Tensor | None = None,
+                k: int = 4) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x_feat = z_t.squeeze(1)
         if ictcp is not None:
             mean = ictcp.mean(dim=(2, 3))  # [B, 3]
-            # Use unbiased=False and clamp var to 0.0 to prevent negative values from precision errors
             var = torch.clamp(ictcp.var(dim=(2, 3), unbiased=False), min=0.0)
             std = torch.sqrt(var + 1e-8)    # [B, 3]
             stats = torch.cat([mean, std], dim=1)  # [B, 6]
         else:
             stats = torch.zeros(x_feat.size(0), 6, device=z_t.device, dtype=z_t.dtype)
-            
+
         x = torch.cat([x_feat, stats], dim=1)  # [B, n_features + 6]
         logits = self.router(x)
-        idx = logits.argmax(-1)
-        return idx, logits
+        weights, idx = torch.topk(F.softmax(logits, dim=-1), k, dim=-1)  # [B, k], [B, k]
+        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
+        return idx, weights, logits
 
     def load_balancing_loss(self, logits: torch.Tensor) -> torch.Tensor:
         probs = F.softmax(logits, dim=-1)

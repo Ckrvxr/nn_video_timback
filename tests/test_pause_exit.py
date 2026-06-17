@@ -58,7 +58,8 @@ def test_pause_and_exit_triggers():
             },
             'model_architecture': {
                 'model_name': 'mamba_fixer',
-                'num_experts': 42,
+                'num_experts': 100,
+                'n_active': 4,
             },
             'dataset': {
                 'num_frames': 5,

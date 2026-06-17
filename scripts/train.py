@@ -242,7 +242,7 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     sequential = dataset_cfg.get('sequential_mode', False) and is_mamba
     center_idx = dataset_cfg['num_frames'] // 2
     prev_video_id = -1
-    expert_counts = torch.zeros(model_cfg.get('num_experts', 42), device='cpu')
+    expert_counts = torch.zeros(model_cfg.get('num_experts', 100), device='cpu')
     use_sam = training_cfg.get('enable_sam', False)
 
     if is_mamba:
@@ -596,7 +596,8 @@ def main():
             num_features=model_cfg.get('num_features', 16),
             state_dimension=model_cfg.get('state_dimension', 32),
             num_features_stream=model_cfg.get('num_features_stream', 2),
-            num_experts=model_cfg.get('num_experts', 42),
+            num_experts=model_cfg.get('num_experts', 100),
+            n_active=model_cfg.get('n_active', 4),
             dilation_rates=model_cfg.get('dilation_rates', [1, 2, 4, 32]),
         ).to(device, memory_format=torch.channels_last)
 

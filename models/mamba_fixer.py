@@ -10,11 +10,13 @@ from models.components import (
     yuv_to_ictcp,
     ictcp_to_yuv,
 )
+from models.components.hilbert import hilbert_flat_indices
 
 
 class MambaFixer(nn.Module):
     def __init__(self, num_features: int = 64, state_dimension: int = 32,
-                 num_features_stream: int = 2, num_experts: int = 42,
+                 num_features_stream: int = 2, num_experts: int = 100,
+                 n_active: int = 4,
                  dilation_rates: list[int] | None = None):
         super().__init__()
         self.num_features = num_features
@@ -23,11 +25,11 @@ class MambaFixer(nn.Module):
         self.downsample = DownsampleChain()
         self.patch_embed = PatchEmbed(1, num_features, 4)
 
-        self.h_ssm = SequenceProcessor(num_features, state_dimension)
-        self.v_ssm = SequenceProcessor(num_features, state_dimension)
+        self.hilbert_ssm = SequenceProcessor(num_features, state_dimension)
         self.t_ssm = SequenceProcessor(num_features, state_dimension)
 
         self.router = MoERouter(num_features, num_experts)
+        self.n_active = n_active
 
         if dilation_rates is None:
             dilation_rates = [1, 2, 4, 32]
@@ -63,39 +65,38 @@ class MambaFixer(nn.Module):
         dev = ictcp.device
         self._ensure_state(B, dev)
 
-        h_state = torch.zeros(B, self._t_state.shape[-1], device=dev)
-        v_state = torch.zeros(B, self._t_state.shape[-1], device=dev)
+        state = torch.zeros(B, self._t_state.shape[-1], device=dev)
 
         i_ch = ictcp[:, 0:1]
         ds = self.downsample(i_ch)
         feat = self.patch_embed(ds)
 
         B_embed, C_embed, H_embed, W_embed = feat.shape
-        seq_h = feat.view(B_embed, C_embed, -1).transpose(1, 2)
-        seq_v = feat.transpose(2, 3).contiguous().view(B_embed, C_embed, -1).transpose(1, 2)
+        flat = feat.view(B_embed, C_embed, -1).transpose(1, 2)
+        idx = hilbert_flat_indices(H_embed, W_embed).to(device=dev, non_blocking=True)
+        seq = flat[:, idx]
 
-        z_h, _ = self.h_ssm(seq_h, h_state)
-        z_v, _ = self.v_ssm(seq_v, v_state)
-
-        z = z_h + z_v
+        z, _ = self.hilbert_ssm(seq, state)
 
         z_t, self._t_state = self.t_ssm(z.unsqueeze(1), self._t_state)
         return z_t
 
-    def apply_experts(self, ictcp: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-        # Vectorized expert application
-        B = ictcp.shape[0]
-        final_output = torch.zeros_like(ictcp)
-        for e in range(self.n_experts):
-            mask = (idx == e)
-            if mask.any():
-                batch_indices = mask.nonzero(as_tuple=True)[0]
-                inp = ictcp[batch_indices]
-                delta_i = self.experts_i[e](inp[:, 0:1])
-                delta_ct = self.experts_ct[e](inp[:, 1:2])
-                delta_cp = self.experts_cp[e](inp[:, 2:3])
-                final_output[batch_indices] = inp + torch.cat([delta_i, delta_ct, delta_cp], dim=1)
-        return final_output
+    def apply_experts(self, ictcp: torch.Tensor, idx: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        B, K = idx.shape
+        delta_acc = torch.zeros_like(ictcp)
+        for k in range(K):
+            for e in range(self.n_experts):
+                mask = (idx[:, k] == e)
+                if mask.any():
+                    batch_indices = mask.nonzero(as_tuple=True)[0]
+                    w = weights[batch_indices, k].view(-1, 1, 1, 1)
+                    inp = ictcp[batch_indices]
+                    delta_i = self.experts_i[e](inp[:, 0:1])
+                    delta_ct = self.experts_ct[e](inp[:, 1:2])
+                    delta_cp = self.experts_cp[e](inp[:, 2:3])
+                    delta = torch.cat([delta_i, delta_ct, delta_cp], dim=1)
+                    delta_acc[batch_indices] += w * delta
+        return ictcp + delta_acc
 
     def forward(self, x: torch.Tensor, ssm_only: bool = False) -> torch.Tensor | None:
         z_t = self.forward_ssm_ictcp(x)
@@ -103,10 +104,10 @@ class MambaFixer(nn.Module):
         if ssm_only:
             return None
 
-        idx, logits = self.router(z_t, x)
+        idx, weights, logits = self.router(z_t, x, k=self.n_active)
 
         self._last_expert_idx = idx.detach().cpu()
         self._balancing_loss = self.router.load_balancing_loss(logits)
 
-        cleaned_ictcp = self.apply_experts(x, idx)
+        cleaned_ictcp = self.apply_experts(x, idx, weights)
         return cleaned_ictcp

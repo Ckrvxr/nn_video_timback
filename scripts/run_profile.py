@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--nf", type=int, default=2)
     parser.add_argument("--d_state", type=int, default=32)
-    parser.add_argument("--n_experts", type=int, default=42)
+    parser.add_argument("--n_experts", type=int, default=100)
     parser.add_argument("--dilations", nargs="+", type=int, default=[1, 2, 4, 32])
     parser.add_argument("--channels_last", action="store_true", default=True)
     args = parser.parse_args()
