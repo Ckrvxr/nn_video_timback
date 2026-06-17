@@ -16,11 +16,15 @@ class FFTLoss(nn.Module):
         # Compute 2D Fast Fourier Transform on the spatial dimensions (H, W)
         # norm="ortho" scales the FFT so that the forward and backward transforms are energy-preserving,
         # which stabilizes training.
-        pred_fft = torch.fft.rfft2(pred, dim=(-2, -1), norm="ortho")
-        target_fft = torch.fft.rfft2(target, dim=(-2, -1), norm="ortho")
+        # We cast inputs to float32 first to avoid overflow or NaN during FFT computation.
+        pred_f32 = pred.float()
+        target_f32 = target.float()
+        
+        pred_fft = torch.fft.rfft2(pred_f32, dim=(-2, -1), norm="ortho")
+        target_fft = torch.fft.rfft2(target_f32, dim=(-2, -1), norm="ortho")
         
         # Calculate L1 distance on both real and imaginary components of the spectrum
         loss = torch.mean(torch.abs(pred_fft.real - target_fft.real)) + \
                torch.mean(torch.abs(pred_fft.imag - target_fft.imag))
                
-        return loss
+        return loss.to(pred.dtype)

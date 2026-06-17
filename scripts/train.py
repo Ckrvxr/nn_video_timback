@@ -74,9 +74,15 @@ signal.signal(signal.SIGINT, sigint_handler)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import gc
 import numpy as np
+try:
+    import psutil
+except ImportError:
+    psutil = None
 import torch
 warnings.filterwarnings('ignore', message='Cannot set number of intraop threads')
+warnings.filterwarnings('ignore', message='Detected call of `lr_scheduler.step\\(\\)` before `optimizer.step\\(\\)`')
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -84,13 +90,10 @@ from yaml import safe_load
 from tqdm import tqdm
 
 from models import MambaFixer
-from models.components.color_space import yuv_to_rgb
+from models.components.color_space import yuv_to_rgb, ictcp_to_yuv
 from losses.composite import CompositeLoss
 from utils.console import console
 from utils.dataset import create_dataloader
-from utils.frame_cache import FrameCache
-from utils.blosc_cache import BloscCache
-from utils.video_loader import load_video_frames_raw
 from utils.metrics import calculate_psnr_batch, calculate_ssim_batch
 from utils.sam import SAM
 
@@ -148,21 +151,61 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch, run_dir: Path, output_dir: Path, is_best: bool = False):
-    ckpt = {
-        'epoch': epoch,
-        'model_state_dict': {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
-        'optimizer_state_dict': {k: v.detach().cpu().clone() if isinstance(v, torch.Tensor) else v
-                                 for k, v in optimizer.state_dict().items()},
-        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-    }
+def check_memory(config, force: bool = False):
+    mem_cfg = config.get('memory_settings', {})
+    max_ram_ratio = mem_cfg.get('max_ram_ratio', 0.0)
+    max_vram_ratio = mem_cfg.get('max_vram_ratio', 0.0)
 
+    ram_exceeded = False
+    vram_exceeded = False
+
+    if max_ram_ratio > 0 and psutil is not None:
+        proc = psutil.Process()
+        rss = proc.memory_info().rss
+        total = psutil.virtual_memory().total
+        ratio = rss / total
+        if ratio > max_ram_ratio or force:
+            gc.collect()
+            rss_after = proc.memory_info().rss
+            ratio_after = rss_after / total
+            if ratio_after > max_ram_ratio * 1.1:
+                console.warning(f"RAM 仍超限: {ratio_after*100:.0f}% (上限 {max_ram_ratio*100:.0f}%)")
+                gc.collect()
+            elif ratio_after > max_ram_ratio:
+                console.info(f"GC 后 RAM: {ratio_after*100:.0f}% (上限 {max_ram_ratio*100:.0f}%)")
+            ram_exceeded = ratio_after > max_ram_ratio
+
+    if max_vram_ratio > 0 and torch.cuda.is_available():
+        dev = torch.cuda.current_device()
+        total_vram = torch.cuda.get_device_properties(dev).total_memory
+        allocated = torch.cuda.memory_allocated(dev)
+        ratio = allocated / total_vram
+        if ratio > max_vram_ratio or force:
+            torch.cuda.empty_cache()
+            allocated_after = torch.cuda.memory_allocated(dev)
+            ratio_after = allocated_after / total_vram
+            if ratio_after > max_vram_ratio * 1.1:
+                console.warning(f"显存仍超限: {ratio_after*100:.0f}% (上限 {max_vram_ratio*100:.0f}%)")
+            elif ratio_after > max_vram_ratio:
+                console.info(f"empty_cache 后显存: {ratio_after*100:.0f}% (上限 {max_vram_ratio*100:.0f}%)")
+            vram_exceeded = ratio_after > max_vram_ratio
+
+    return ram_exceeded, vram_exceeded
+
+
+def save_checkpoint(model, optimizer, scheduler, epoch, run_dir: Path, output_dir: Path, is_best: bool = False):
     run_last = run_dir / 'last.pth'
     run_best = run_dir / 'best.pth'
     out_last = output_dir / 'last.pth'
     out_best = output_dir / 'best.pth'
 
     def _write():
+        ckpt = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+        }
         torch.save(ckpt, str(run_last))
         if is_best:
             shutil.copy2(str(run_last), str(run_best))
@@ -173,85 +216,10 @@ def save_checkpoint(model, optimizer, scheduler, epoch, run_dir: Path, output_di
     _IO_QUEUE.put((_write, (), {}))
 
 
-def _cache_one_video(args: tuple) -> str:
-    """Decode one video and write to BloscCache. Returns status string."""
-    video_path, cache_root = args
-    cache = BloscCache(cache_root)
-    cp = cache.cache_path(video_path)
-    if cp.exists():
-        return f'skip  {Path(video_path).name}'
-    raw_frames = load_video_frames_raw(video_path)
-    cache.put_raw(video_path, raw_frames)
-    return f'cached {Path(video_path).name} ({len(raw_frames)} frames)'
-
-
-from concurrent.futures import ProcessPoolExecutor, as_completed
-
-def clear_dataset_cache(dataset_path):
-    cache_root = Path(dataset_path) / 'cache_yuv'
-    if cache_root.exists():
-        console.info(f"Clearing cache directory: {cache_root}")
-        try:
-            shutil.rmtree(str(cache_root))
-            console.success(f"Successfully cleared cache: {cache_root}")
-        except Exception as e:
-            console.error(f"Failed to clear cache {cache_root}: {e}")
-
-def warm_blosc_cache(config, target_dataset_path=None):
-    if not config['dataset'].get('warm_cache_on_startup', True):
-        console.info('Skipping cache warming')
-        return
-
-    datasets = config['dataset']['dataset_paths']
-    if target_dataset_path is not None:
-        datasets = [str(target_dataset_path)]
-        
-    limit = config['dataset'].get('limit', 0) # Fallback for CLI limit
-
-    todos = []
-    for ds_root_str in datasets:
-        ds_root = Path(ds_root_str)
-        cache_root = ds_root / 'cache_yuv'
-        hr_dir = ds_root / 'HR'
-
-        video_names = sorted(f.stem for f in hr_dir.glob('*.mp4'))
-        if limit > 0:
-            video_names = video_names[:limit]
-
-        # Targets include HR and all other variant directories
-        variant_dirs = [d for d in ds_root.iterdir() if d.is_dir() and d.name not in ('HR', 'cache_yuv')]
-        targets = [hr_dir] + variant_dirs
-        
-        for vd in targets:
-            for name in video_names:
-                mp4 = vd / f'{name}.mp4'
-                if mp4.exists():
-                    blosc = BloscCache(cache_root)
-                    if not blosc.cache_path(mp4).exists():
-                        todos.append((str(mp4), str(cache_root)))
-
-    if not todos:
-        console.success(f"BloscCache already warm for {[Path(d).name for d in datasets]}")
-        return
-
-    console.info(f"Warming BloscCache for {[Path(d).name for d in datasets]}: {len(todos)} files (Sequential mode for 16GB RAM)...")
-    # Force 1 worker to avoid OOM on 16GB RAM machines when processing 4K
-    max_workers = 1 
-    t0 = time.perf_counter()
-    
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_cache_one_video, todo) for todo in todos]
-        for future in tqdm(as_completed(futures), total=len(todos), desc="Warming Cache", unit="vid"):
-            try:
-                future.result()
-            except Exception as e:
-                console.error(f'Failed to cache video: {e}')
-
-    console.success(f"Cache warming complete ({time.perf_counter() - t0:.1f}s)")
-
 
 def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None, batch_times=None, run_dir=None):
     global EXIT_FLAG
+    device = torch.device(device)
     model.train()
     total_loss = 0.0
     n_batches = len(loader)
@@ -265,6 +233,9 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     grad_accum = training_cfg.get('gradient_accumulation_steps', 1)
     clip_grad = training_cfg['gradient_clipping_threshold']
     bs = training_cfg['batch_size']
+    cuda_cache_interval = logging_cfg.get('cuda_cache_interval', 200)
+    memory_cfg = config.get('memory_settings', {})
+    mem_check_interval = memory_cfg.get('check_interval', 0)
     
     model_name = model_cfg.get('model_name', 'hyper_fixer')
     is_mamba = model_name == 'mamba_fixer'
@@ -279,8 +250,8 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
 
     pbar = tqdm(total=n_batches, desc="Training", unit="batch", leave=False, miniters=10)
     t_batch_start = time.perf_counter()
-    optimizer.zero_grad()
-    
+    optimizer.zero_grad(set_to_none=True)
+
     for batch_idx, batch in enumerate(loader):
         if run_dir:
             pause_file = run_dir / '.pause'
@@ -329,14 +300,16 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
 
                 for t in range(lr.size(1)):
                     if t == center_idx:
-                        pred = model(lr[:, t].to(memory_format=torch.channels_last), pre_ictcp=False)
+                        pred = model(lr[:, t].to(memory_format=torch.channels_last))
                         loss_dict = criterion(pred, hr.to(memory_format=torch.channels_last))
-                        loss_dict['moe'] = model._balancing_loss * 0.1
+                        loss_dict['moe'] = model._balancing_loss * 0.1 if getattr(model, '_balancing_loss', None) is not None else torch.tensor(0.0, device=device)
+                        if hasattr(model, '_balancing_loss'):
+                            model._balancing_loss = None  # Clear graph reference immediately
                         loss_dict['total'] = loss_dict['total'] + loss_dict['moe']
                         loss = loss_dict['total'] / grad_accum
                     else:
                         with torch.no_grad():
-                            model(lr[:, t].to(memory_format=torch.channels_last), ssm_only=True, pre_ictcp=False)
+                            model(lr[:, t].to(memory_format=torch.channels_last), ssm_only=True)
                 
                 if hasattr(model, '_last_expert_idx'):
                     expert_counts.index_add_(0, model._last_expert_idx.cpu(),
@@ -345,9 +318,11 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                 
             else:
                 model.reset_state(lr.size(0), device)
-                pred = model(lr[:, center_idx].to(memory_format=torch.channels_last), pre_ictcp=False)
+                pred = model(lr[:, center_idx].to(memory_format=torch.channels_last))
                 loss_dict = criterion(pred, hr.to(memory_format=torch.channels_last))
-                loss_dict['moe'] = model._balancing_loss * 0.1
+                loss_dict['moe'] = model._balancing_loss * 0.1 if getattr(model, '_balancing_loss', None) is not None else torch.tensor(0.0, device=device)
+                if hasattr(model, '_balancing_loss'):
+                    model._balancing_loss = None  # Clear graph reference immediately
                 loss_dict['total'] = loss_dict['total'] + loss_dict['moe']
                 loss = loss_dict['total'] / grad_accum
                 if hasattr(model, '_last_expert_idx'):
@@ -376,36 +351,78 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                 # 1. SAM first step
                 if scaler is not None:
                     scaler.unscale_(optimizer)
-                optimizer.first_step(zero_grad=True)
-
-                # 2. Restore Mamba state for second pass
-                if saved_state is not None:
-                    model._t_state = saved_state.clone()
-
-                # 3. Second pass (on adversarial weights)
-                with torch.amp.autocast(device_type='cuda', enabled=scaler is not None):
-                    loss_adv, loss_dict_adv = run_forward()
-
-                if scaler is not None:
-                    scaler.scale(loss_adv).backward()
-                    # Manually unscale gradients for the second pass to avoid PyTorch's double-unscale assertion
-                    inv_scale = 1.0 / (scaler.get_scale() + 1e-8)
-                    for group in optimizer.param_groups:
-                        for p in group['params']:
-                            if p.grad is not None:
-                                p.grad.data.mul_(inv_scale)
+                
+                # Check for NaNs/Infs in the gradients before taking the first step
+                has_nan_or_inf = False
+                for p in model.parameters():
+                    if p.grad is not None:
+                        if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
+                            has_nan_or_inf = True
+                            break
+                
+                if has_nan_or_inf:
+                    console.warning("NaN or Inf detected in gradients. Skipping SAM step.")
+                    optimizer.zero_grad(set_to_none=True)
+                    if scaler is not None:
+                        scaler.update()
                 else:
-                    loss_adv.backward()
+                    optimizer.first_step(zero_grad=True)
 
-                # Gradient clipping
-                nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                    # 2. Restore Mamba state for second pass
+                    if saved_state is not None:
+                        model._t_state = saved_state.clone()
 
-                # 4. SAM second step
-                optimizer.second_step(zero_grad=True)
+                    # 3. Second pass (on adversarial weights)
+                    with torch.amp.autocast(device_type='cuda', enabled=scaler is not None):
+                        loss_adv, loss_dict_adv = run_forward()
 
-                # Update scaler scale factor if AMP is used
-                if scaler is not None:
-                    scaler.update()
+                    if scaler is not None:
+                        scaler.scale(loss_adv).backward()
+                        # Manually unscale gradients for the second pass to avoid PyTorch's double-unscale assertion
+                        inv_scale = 1.0 / (scaler.get_scale() + 1e-8)
+                        for group in optimizer.param_groups:
+                            for p in group['params']:
+                                if p.grad is not None:
+                                    p.grad.data.mul_(inv_scale)
+                    else:
+                        loss_adv.backward()
+
+                    # Check for NaNs/Infs in the second-pass gradients
+                    has_nan_or_inf_adv = False
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
+                                has_nan_or_inf_adv = True
+                                break
+                    
+                    if has_nan_or_inf_adv:
+                        console.warning("NaN or Inf detected in second-pass gradients. Skipping SAM step.")
+                        # Force the scaler to know that an inf was found in the second pass
+                        if scaler is not None:
+                            opt_state = scaler._per_optimizer_states.get(id(optimizer))
+                            if opt_state is not None:
+                                for dev in opt_state['found_inf_per_device'].keys():
+                                    opt_state['found_inf_per_device'][dev].fill_(1.0)
+                        
+                        # Restore original parameters manually
+                        for group in optimizer.param_groups:
+                            for p in group["params"]:
+                                if p in optimizer.state and "old_p" in optimizer.state[p]:
+                                    p.data.copy_(optimizer.state[p]["old_p"])
+                                    del optimizer.state[p]["old_p"]
+                        optimizer.zero_grad(set_to_none=True)
+                        if scaler is not None:
+                            scaler.update()
+                    else:
+                        # Gradient clipping
+                        nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+
+                        # 4. SAM second step
+                        optimizer.second_step(zero_grad=True)
+
+                        # Update scaler scale factor if AMP is used
+                        if scaler is not None:
+                            scaler.update()
 
             else:
                 # Standard optimization step
@@ -417,33 +434,44 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                 else:
                     nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
                     optimizer.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
 
         batch_loss = loss_dict['total'].item()
         total_loss += batch_loss
 
-        # Print detailed ASCII Leaderboard and Loss Breakdown every log_interval batches
+        # Print detailed Expert Leaderboard and Loss Breakdown every log_interval batches
         if (batch_idx + 1) % log_interval == 0:
             total_selections = expert_counts.sum().item()
             if total_selections > 0:
-                counts, indices = torch.sort(expert_counts, descending=True)
-                console.info(f"\n🏆 Expert Leaderboard & Loss Breakdown (Batch {batch_idx + 1}/{n_batches})")
-                console.info("=" * 60)
-                console.info(f"{'Rank':<6}{'Expert ID':<12}{'Count':<10}{'Percentage':<12}")
-                console.info("-" * 60)
-                for rank in range(min(5, len(indices))):
-                    idx = indices[rank].item()
-                    cnt = counts[rank].item()
-                    pct = (cnt / total_selections) * 100
-                    if cnt > 0:
-                        console.info(f"{rank+1:<6}Expert {idx:02d}{'':<4}{int(cnt):<10}{pct:.1f}%")
-                console.info("-" * 60)
-                console.info("Loss Components (Unscaled):")
+                n_experts = expert_counts.size(0)
+                console.info(f"\n🏆 Expert Heatmap (Batch {batch_idx + 1}/{n_batches})")
+                console.info("─" * 95)
+
+                def heat_color(pct):
+                    if pct >= 20: return "red"
+                    if pct >= 10: return "yellow"
+                    if pct >= 5:  return "green"
+                    if pct >= 1:  return "blue"
+                    return "white"
+
+                for row_start in range(0, n_experts, 7):
+                    cells = []
+                    for offset in range(7):
+                        idx = row_start + offset
+                        if idx >= n_experts:
+                            break
+                        cnt = expert_counts[idx].item()
+                        pct = (cnt / total_selections) * 100
+                        color = heat_color(pct)
+                        cells.append(f"<{color}>E{idx:02d} {pct:>5.1f}%</{color}>")
+                    console.opt(colors=True).info("  ".join(cells))
+                console.info("─" * 95)
+                loss_parts = []
                 for name, val in loss_dict.items():
                     if name != 'total':
-                        console.info(f"  - {name.capitalize():<15}: {val.item():.6f}")
-                console.info(f"  - Total Loss{'':<5}: {loss_dict['total'].item():.6f}")
-                console.info("=" * 60)
+                        loss_parts.append(f"{name}={val.item():.6f}")
+                console.info("Loss: " + "  ".join(loss_parts))
+                console.info("─" * 95)
 
         t_now = time.perf_counter()
         batch_time = t_now - t_batch_start
@@ -472,7 +500,20 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
         )
         pbar.update(1)
 
+        if device.type == 'cuda' and (batch_idx + 1) % cuda_cache_interval == 0:
+            torch.cuda.empty_cache()
+
+        if mem_check_interval > 0 and (batch_idx + 1) % mem_check_interval == 0:
+            check_memory(config)
+
     pbar.close()
+
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+
+    if mem_check_interval > 0:
+        check_memory(config, force=True)
+
     return total_loss / n_batches
 
 
@@ -495,16 +536,16 @@ def validate(model, val_loader, device, max_samples=100, num_vmaf_samples=0):
 
         if is_mamba:
             model.reset_state(lr.size(0), device)
-            # Validation uses pre_ictcp=False because Dataloader provides YUV
-            pred = model(lr[:, lr.size(1)//2].to(memory_format=torch.channels_last), pre_ictcp=False)
+            pred = model(lr[:, lr.size(1)//2].to(memory_format=torch.channels_last))
         else:
             center = lr.size(1)//2
             pred = model(lr[:, center-1], lr[:, center], lr[:, center+1])
 
-        # CompositeLoss expects pred/hr in normalized YUV range.
-        # But PSNR/SSIM calculation needs RGB.
-        pred_rgb = yuv_to_rgb(pred)
-        hr_rgb = yuv_to_rgb(hr)
+        # Model outputs ICtCp; convert to YUV for metrics.
+        pred_yuv = ictcp_to_yuv(pred)
+        hr_yuv = ictcp_to_yuv(hr)
+        pred_rgb = yuv_to_rgb(pred_yuv)
+        hr_rgb = yuv_to_rgb(hr_yuv)
 
         batch_size = pred.size(0)
         take = min(batch_size, max_samples - n)
@@ -515,7 +556,7 @@ def validate(model, val_loader, device, max_samples=100, num_vmaf_samples=0):
         if num_vmaf_samples > 0 and n_vmaf < num_vmaf_samples:
             from utils.vmaf import compute_vmaf
             for b in range(min(take, num_vmaf_samples - n_vmaf)):
-                total_fpsnr += compute_vmaf(pred[b:b+1], hr[b:b+1])
+                total_fpsnr += compute_vmaf(pred_yuv[b:b+1], hr_yuv[b:b+1])
                 n_vmaf += 1
 
     avg_vmaf = total_fpsnr / max(1, n_vmaf)
@@ -607,7 +648,6 @@ def main():
     val_loader = None
 
     if not multiple_datasets:
-        warm_blosc_cache(config)
         train_loader = create_dataloader(
             datasets=dataset_cfg['dataset_paths'],
             batch_size=training_cfg['batch_size'],
@@ -615,7 +655,6 @@ def main():
             frames=dataset_cfg['num_frames'],
             workers=dataset_cfg['num_workers'],
             is_train=True,
-            cache_max_videos=dataset_cfg.get('max_videos_in_cache'),
             clip_repeat=dataset_cfg.get('clip_repeat_factor', 1),
             sequential=dataset_cfg.get('sequential_mode', False),
         )
@@ -626,7 +665,6 @@ def main():
             frames=dataset_cfg['num_frames'],
             workers=dataset_cfg.get('validation_num_workers', 2),
             is_train=False,
-            cache_max_videos=dataset_cfg.get('max_videos_in_cache'),
         )
 
     global RUN_DIR
@@ -706,8 +744,6 @@ def main():
                     if EXIT_FLAG:
                         break
 
-                    warm_blosc_cache(config, target_dataset_path=ds_path)
-                    
                     ds_loader = create_dataloader(
                         datasets=[ds_path],
                         batch_size=training_cfg['batch_size'],
@@ -715,7 +751,6 @@ def main():
                         frames=dataset_cfg['num_frames'],
                         workers=dataset_cfg['num_workers'],
                         is_train=True,
-                        cache_max_videos=dataset_cfg.get('max_videos_in_cache'),
                         clip_repeat=dataset_cfg.get('clip_repeat_factor', 1),
                         sequential=dataset_cfg.get('sequential_mode', False),
                         persistent_workers=False,
@@ -726,7 +761,6 @@ def main():
                     total_batches += len(ds_loader)
                     
                     del ds_loader
-                    clear_dataset_cache(ds_path)
                 
                 train_loss = epoch_loss / total_batches if total_batches > 0 else 0.0
             else:
@@ -751,7 +785,6 @@ def main():
                     for ds_path in val_datasets:
                         if EXIT_FLAG:
                             break
-                        warm_blosc_cache(config, target_dataset_path=ds_path)
                         ds_val_loader = create_dataloader(
                             datasets=[ds_path],
                             batch_size=dataset_cfg.get('validation_batch_size', 2),
@@ -759,7 +792,6 @@ def main():
                             frames=dataset_cfg['num_frames'],
                             workers=dataset_cfg.get('validation_num_workers', 2),
                             is_train=False,
-                            cache_max_videos=dataset_cfg.get('max_videos_in_cache'),
                             persistent_workers=False,
                         )
                         psnr, ssim, vmaf = validate(model, ds_val_loader, device, num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
@@ -767,7 +799,6 @@ def main():
                         total_ssim += ssim
                         total_vmaf += vmaf
                         del ds_val_loader
-                        clear_dataset_cache(ds_path)
                     
                     psnr = total_psnr / len(val_datasets)
                     ssim = total_ssim / len(val_datasets)
@@ -776,6 +807,9 @@ def main():
                     psnr, ssim, vmaf = validate(model, val_loader, device, num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
                 
                 console.info(f'Epoch {epoch}: loss={train_loss:.4f} | psnr={psnr:.2f} | ssim={ssim:.4f}')
+                
+                if logging_cfg.get('empty_cuda_cache_on_validation', False):
+                    torch.cuda.empty_cache()
 
             save_checkpoint(model, optimizer, scheduler, epoch, run_dir, output_dir)
     finally:

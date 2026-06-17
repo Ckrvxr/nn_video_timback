@@ -9,12 +9,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader, BatchSampler
 
 from .video_loader import probe_frame_count
-from .frame_cache import FrameCache
-
-
-def _worker_init(worker_id):
-    """Worker init: disable PyAV decode — workers read BloscCache only."""
-    FrameCache().set_decode_allowed(False)
+from .frame_cache import LazyFrameRange
 
 
 class AV1CompressedVideoDataset(Dataset):
@@ -55,11 +50,6 @@ class AV1CompressedVideoDataset(Dataset):
     @staticmethod
     def _variant_n_frames(variant_dir: Path, video_name: str) -> int:
         return probe_frame_count(str(variant_dir / f'{video_name}.mp4'))
-
-    @staticmethod
-    def _load_any_format(dir_path: Path, video_name: str) -> list[np.ndarray]:
-        from .video_loader import load_video_frames
-        return load_video_frames(str(dir_path / f'{video_name}.mp4'))
 
     @staticmethod
     def _inventory_cache_path(ds_root: Path) -> Path:
@@ -156,9 +146,6 @@ class AV1CompressedVideoDataset(Dataset):
         if self._cache_key == key:
             return
 
-        if self.enable_cache:
-            FrameCache().set_cache_root(ds_root / 'cache_yuv')
-
         hr_path = ds_root / 'HR' / f'{video_name}.mp4'
         lr_path = ds_root / variant_name / f'{video_name}.mp4'
         if not hr_path.exists():
@@ -166,7 +153,19 @@ class AV1CompressedVideoDataset(Dataset):
         if not lr_path.exists():
             raise FileNotFoundError(f'LR video not found: {lr_path}')
 
-        self._hr_cache, self._lr_cache = FrameCache().get_or_load(hr_path, lr_path)
+        n_frames = next(
+            (v['n_frames'] for v in self.videos
+             if v['name'] == video_name and v['ds_root'] == ds_root),
+            None)
+        if n_frames is None:
+            raise RuntimeError(f'Video {video_name} not found in inventory')
+
+        bc = None
+        if self.enable_cache:
+            from .blosc_cache import BloscCache
+            bc = BloscCache(ds_root / 'cache_ictcp')
+        self._hr_cache = LazyFrameRange(bc, str(hr_path), n_frames)
+        self._lr_cache = LazyFrameRange(bc, str(lr_path), n_frames)
         self._cache_key = key
 
     def __len__(self) -> int:
@@ -232,10 +231,10 @@ class AV1CompressedVideoDataset(Dataset):
         hr_prev_frame = max(0, center_frame - 1)
         hr_prev_patch = self._safe_crop(self._hr_cache[hr_prev_frame], crop_y, crop_x, crop_size)
 
-        # Convert to torch and float32, permute and normalize to YUV range [-1, 1].
-        lr_t = torch.from_numpy(np.stack(lr_frames, axis=0)).float().permute(0, 3, 1, 2) / 127.5 - 1.0
-        hr_t = torch.from_numpy(hr_patch).float().permute(2, 0, 1) / 127.5 - 1.0
-        hr_prev_t = torch.from_numpy(hr_prev_patch).float().permute(2, 0, 1) / 127.5 - 1.0
+        # ICtCp standard range (I∈[0,1], CtCp∈[-0.5,0.5]), no normalization.
+        lr_t = torch.from_numpy(np.stack(lr_frames, axis=0)).float().permute(0, 3, 1, 2)
+        hr_t = torch.from_numpy(hr_patch).float().permute(2, 0, 1)
+        hr_prev_t = torch.from_numpy(hr_prev_patch).float().permute(2, 0, 1)
 
         out = {'lr_frames': lr_t, 'hr': hr_t, 'hr_prev': hr_prev_t}
         if video_id is not None:
@@ -249,11 +248,21 @@ class CleanVSRDataset(AV1CompressedVideoDataset):
         if self._cache_key == key:
             return
 
-        if self.enable_cache:
-            FrameCache().set_cache_root(ds_root / 'cache_yuv')
-
         hr_path = ds_root / 'HR' / f'{video_name}.mp4'
-        self._hr_cache, self._lr_cache = FrameCache().get_or_load(hr_path, hr_path)
+
+        n_frames = next(
+            (v['n_frames'] for v in self.videos
+             if v['name'] == video_name and v['ds_root'] == ds_root),
+            None)
+        if n_frames is None:
+            raise RuntimeError(f'Video {video_name} not found in inventory')
+
+        bc = None
+        if self.enable_cache:
+            from .blosc_cache import BloscCache
+            bc = BloscCache(ds_root / 'cache_ictcp')
+        self._hr_cache = LazyFrameRange(bc, str(hr_path), n_frames)
+        self._lr_cache = LazyFrameRange(bc, str(hr_path), n_frames)
         self._cache_key = key
 
     def _build_inventory(self) -> list[dict]:
@@ -305,11 +314,14 @@ class CleanVSRDataset(AV1CompressedVideoDataset):
         hr_prev_frame = max(0, center_frame - 1)
         hr_prev_patch = self._safe_crop(self._hr_cache[hr_prev_frame], crop_y, crop_x, crop_size)
 
-        lr_t = torch.from_numpy(np.stack(lr_frames, axis=0)).float().permute(0, 3, 1, 2) / 127.5 - 1.0
-        hr_t = torch.from_numpy(hr_patch).float().permute(2, 0, 1) / 127.5 - 1.0
-        hr_prev_t = torch.from_numpy(hr_prev_patch).float().permute(2, 0, 1) / 127.5 - 1.0
+        lr_t = torch.from_numpy(np.stack(lr_frames, axis=0)).float().permute(0, 3, 1, 2)
+        hr_t = torch.from_numpy(hr_patch).float().permute(2, 0, 1)
+        hr_prev_t = torch.from_numpy(hr_prev_patch).float().permute(2, 0, 1)
 
-        return {'lr_frames': lr_t, 'hr': hr_t, 'hr_prev': hr_prev_t}
+        out = {'lr_frames': lr_t, 'hr': hr_t, 'hr_prev': hr_prev_t}
+        if video_id is not None:
+            out['video_id'] = video_id
+        return out
 
 
 class VideoBatchSampler(BatchSampler):
@@ -385,10 +397,11 @@ class ValVideoBatchSampler(BatchSampler):
 
 
 class SequentialVideoBatchSampler(BatchSampler):
-    """Yields sequential frame batches per video, video-shuffled.
+    """Yields sequential frame batches per video, shuffled video order.
 
-    Each video's frames are walked in temporal order, chunked into batches.
-    Videos are shuffled globally so order changes each epoch.
+    Batches within each video are kept in temporal order so the Mamba SSM
+    state persists across all frames of one video before switching to the next.
+    Only the video list is shuffled each epoch.
     Crop position is fixed per video (seeded by video name).
     """
     def __init__(self, dataset, batch_size, shuffle_variants=False):
@@ -399,7 +412,7 @@ class SequentialVideoBatchSampler(BatchSampler):
     def __iter__(self):
         half = self.dataset.frames // 2
 
-        video_batches = []
+        video_batch_lists = []
         for v in self.dataset.videos:
             variant = random.choice(v['variants']) if self.shuffle_variants else v['variants'][0]
             valid_end = v['n_frames'] - half
@@ -408,16 +421,22 @@ class SequentialVideoBatchSampler(BatchSampler):
             crop_seed = hash(f"{v['name']}_{v['ds_root']}") & 0x7FFFFFFF
             video_id = hash(f"{v['name']}_{v['ds_root']}_{variant}") & 0x7FFFFFFF
             frames = list(range(half, valid_end))
+            # Build temporally-ordered batches for this video
+            batches = []
             for i in range(0, len(frames), self.batch_size):
                 chunk = frames[i:i + self.batch_size]
                 if len(chunk) < self.batch_size:
                     continue
-                video_batches.append(
+                batches.append(
                     [(v['name'], variant, f, v['ds_root'], crop_seed, video_id) for f in chunk]
                 )
+            if batches:
+                video_batch_lists.append(batches)
 
-        random.shuffle(video_batches)
-        yield from video_batches
+        # Shuffle video order, keep each video's batches sequential
+        random.shuffle(video_batch_lists)
+        for batches in video_batch_lists:
+            yield from batches
 
     def __len__(self):
         total = sum(max(0, v['n_frames'] - self.dataset.frames + 1) for v in self.dataset.videos)
@@ -460,11 +479,6 @@ def create_dataloader(
         enable_cache=enable_cache,
     )
 
-    if cache_max_videos is not None:
-        import os
-        os.environ['FRAME_CACHE_MAX_VIDEOS'] = str(cache_max_videos)
-        FrameCache()._max_videos = int(cache_max_videos)
-
     if prefetch_factor is None:
         prefetch_factor = 2 if workers > 0 else None
 
@@ -476,7 +490,6 @@ def create_dataloader(
         'pin_memory': True,
         'persistent_workers': persistent_workers,
         'prefetch_factor': prefetch_factor if workers > 0 else None,
-        'worker_init_fn': _worker_init if workers > 0 else None,
     }
 
     if batch_size > 1:

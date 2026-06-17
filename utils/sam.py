@@ -33,21 +33,28 @@ class SAM(torch.optim.Optimizer):
     @torch.no_grad()
     def first_step(self, zero_grad=False):
         grad_norm = self._grad_norm()
+        # Check if grad_norm is invalid (zero, NaN, or Inf)
+        is_invalid = torch.isnan(grad_norm).item() or torch.isinf(grad_norm).item() or grad_norm.item() == 0
+        
         for group in self.param_groups:
-            scale = group["rho"] / (grad_norm + 1e-12)
+            if is_invalid:
+                scale = 0.0
+            else:
+                scale = group["rho"] / (grad_norm + 1e-8)
 
             for p in group["params"]:
                 if p.grad is None: 
                     continue
                 # Save the original parameters
                 self.state[p]["old_p"] = p.data.clone()
-                # Calculate adversarial perturbation
-                e_w = (p.grad * scale).to(p)
-                # Climb to the local maximum "adversarial" parameter
-                p.add_(e_w)
+                if scale > 0.0:
+                    # Calculate adversarial perturbation
+                    e_w = (p.grad * scale).to(p)
+                    # Climb to the local maximum "adversarial" parameter
+                    p.add_(e_w)
 
-        if zero_grad: 
-            self.zero_grad()
+        if zero_grad:
+            self.zero_grad(set_to_none=True)
 
     @torch.no_grad()
     def second_step(self, zero_grad=False):
@@ -62,8 +69,8 @@ class SAM(torch.optim.Optimizer):
         # Step the base optimizer using the accumulated gradients at the adversarial point
         self.base_optimizer.step()
 
-        if zero_grad: 
-            self.zero_grad()
+        if zero_grad:
+            self.zero_grad(set_to_none=True)
 
     @torch.no_grad()
     def step(self, closure=None):

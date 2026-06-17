@@ -19,7 +19,9 @@ class MoERouter(nn.Module):
         x_feat = z_t.squeeze(1)
         if ictcp is not None:
             mean = ictcp.mean(dim=(2, 3))  # [B, 3]
-            std = ictcp.std(dim=(2, 3))    # [B, 3]
+            # Use unbiased=False and clamp var to 0.0 to prevent negative values from precision errors
+            var = torch.clamp(ictcp.var(dim=(2, 3), unbiased=False), min=0.0)
+            std = torch.sqrt(var + 1e-8)    # [B, 3]
             stats = torch.cat([mean, std], dim=1)  # [B, 6]
         else:
             stats = torch.zeros(x_feat.size(0), 6, device=z_t.device, dtype=z_t.dtype)
@@ -30,6 +32,9 @@ class MoERouter(nn.Module):
         return idx, logits
 
     def load_balancing_loss(self, logits: torch.Tensor) -> torch.Tensor:
-        weights = F.softmax(logits, dim=-1).mean(dim=0)
+        probs = F.softmax(logits, dim=-1)
+        weights = probs.mean(dim=0)
         target = torch.ones(self.n_experts, device=logits.device) / self.n_experts
-        return F.kl_div((weights + 1e-8).log(), target, reduction='batchmean')
+        kl = F.kl_div((weights + 1e-8).log(), target, reduction='sum')
+        entropy = -(probs * (probs + 1e-8).log()).sum(dim=-1).mean()
+        return kl - 0.1 * entropy

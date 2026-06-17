@@ -12,7 +12,7 @@ import torch
 from yaml import safe_load
 
 from models import MambaFixer
-from models.components import yuv_to_ictcp, ictcp_to_yuv
+from models.components import yuv_to_ictcp, ictcp_to_yuv, yuv_to_rgb
 
 
 @torch.no_grad()
@@ -112,13 +112,13 @@ def main():
             if w > args.tile_size or h > args.tile_size:
                 pred = tiled_mamba_inference(model, f, tile_size=args.tile_size, overlap=args.overlap)
             else:
-                pred = model(f)
+                pred = ictcp_to_yuv(model(yuv_to_ictcp(f)))
                 
-            pred_np = (pred.squeeze(0).permute(1, 2, 0).cpu().float() + 1) * 127.5
+            pred_rgb = yuv_to_rgb(pred)
+            pred_np = (pred_rgb.squeeze(0).permute(1, 2, 0).cpu().float() + 1) * 127.5
             pred_np = pred_np.clamp(0, 255).numpy().astype(np.uint8)
             
-            rgb = cv2.cvtColor(pred_np, cv2.COLOR_YUV2RGB)
-            out_frame = av.VideoFrame.from_ndarray(rgb, format='rgb24')
+            out_frame = av.VideoFrame.from_ndarray(pred_np, format='rgb24')
             for packet in stream_out.encode(out_frame):
                 container_out.mux(packet)
             

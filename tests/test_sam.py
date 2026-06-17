@@ -93,5 +93,44 @@ def test_sam_optimizer_math():
     
     print("SAM mathematical optimizer test passed successfully!")
 
+def test_sam_invalid_gradients():
+    def get_setup():
+        m = SimpleModel()
+        opt = SAM(m.parameters(), base_optimizer=torch.optim.SGD, rho=0.5, lr=0.1)
+        return m, opt
+
+    # Case 1: Zero gradients
+    model, optimizer = get_setup()
+    optimizer.zero_grad()
+    model.w.grad = torch.tensor([0.0, 0.0])
+    original_w = model.w.data.clone()
+    optimizer.first_step(zero_grad=False)
+    # Since grad_norm is 0, perturbation should be skipped and weights should not change
+    assert torch.all(model.w == original_w)
+    optimizer.second_step(zero_grad=True)
+    
+    # Case 2: NaN gradients
+    model, optimizer = get_setup()
+    optimizer.zero_grad()
+    model.w.grad = torch.tensor([float('nan'), 1.0])
+    original_w = model.w.data.clone()
+    optimizer.first_step(zero_grad=False)
+    # Since grad_norm has NaN, perturbation is skipped
+    assert torch.all(model.w == original_w)
+    optimizer.second_step(zero_grad=True)
+    
+    # Case 3: Inf gradients
+    model, optimizer = get_setup()
+    optimizer.zero_grad()
+    model.w.grad = torch.tensor([float('inf'), 1.0])
+    original_w = model.w.data.clone()
+    optimizer.first_step(zero_grad=False)
+    # Since grad_norm is Inf, perturbation is skipped
+    assert torch.all(model.w == original_w)
+    optimizer.second_step(zero_grad=True)
+    
+    print("SAM invalid gradient stability test passed successfully!")
+
 if __name__ == '__main__':
     test_sam_optimizer_math()
+    test_sam_invalid_gradients()

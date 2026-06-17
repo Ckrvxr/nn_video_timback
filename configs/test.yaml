@@ -1,0 +1,59 @@
+output_directory: runs/test
+random_seed: 42
+
+dataset:
+  dataset_paths: [
+    ./data/datasets/test
+  ]
+  patch_size: 32
+  num_frames: 5
+  sequential_mode: true
+  validation_batch_size: 2
+  num_workers: 0
+  validation_num_workers: 0
+  warm_cache_on_startup: true
+  max_videos_in_cache: 1
+  shuffle_variants: false
+  clip_repeat_factor: 1
+
+model_architecture:
+  model_name: mamba_fixer
+  num_features: 16
+  state_dimension: 8
+  num_features_stream: 2
+  num_experts: 4
+  dilation_rates: [1, 2, 4]
+
+training_settings:
+  batch_size: 2
+  num_epochs: 1
+  learning_rate: 2.0e-4
+  min_learning_rate: 1.0e-6
+  weight_decay: 1.0e-4
+  adam_beta1: 0.9
+  adam_beta2: 0.99
+  gradient_clipping_threshold: 1.0
+  use_mixed_precision: false
+  gradient_accumulation_steps: 1
+  enable_torch_compile: false
+  enable_sam: true
+  sam_rho: 0.05
+
+loss_weights:
+  charbonnier: 1.0
+  laplacian: 0.5
+  color_tight: 0.1
+  temporal_consistency: 0.0
+  fft: 0.1
+
+logging_settings:
+  log_interval: 1
+  checkpoint_save_interval: 1
+  validation_interval: 1
+  num_vmaf_samples: 0
+  empty_cuda_cache_on_validation: false
+
+memory_settings:
+  max_ram_ratio: 0.9
+  max_vram_ratio: 0.9
+  check_interval: 1

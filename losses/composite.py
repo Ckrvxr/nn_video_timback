@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 
 from losses.charbonnier import CharbonnierLoss
-from losses.ms_ssim import MSSSIMLoss
 from losses.temporal import TemporalConsistencyLoss
 from losses.laplacian import LaplacianPyramidLoss
 from losses.color_tight import ColorTightLoss
@@ -16,7 +15,6 @@ class CompositeLoss(nn.Module):
         self.w_laplacian = config.get('laplacian', 0.0)
         self.w_color_tight = config.get('color_tight', 0.0)
         self.w_temp = config.get('temporal_consistency', 0.0)
-        self.w_msssim = config.get('ms_ssim', 0.0)
         self.w_fft = config.get('fft', 0.0)
 
         self.char = CharbonnierLoss()

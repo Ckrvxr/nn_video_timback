@@ -1,31 +1,137 @@
+import numpy as np
 import torch
 
 
-_M_RGB2YUV = torch.tensor([
-    [0.299,   0.587,   0.114 ],
-    [-0.169, -0.331,   0.500 ],
-    [0.500,  -0.419,  -0.081 ],
+# ── PQ Constants
+M1 = 2610.0 / 16384.0
+M2 = 2523.0 / 32.0
+C1 = 3424.0 / 4096.0
+C2 = 2413.0 / 4096.0 * 32.0
+C3 = 2392.0 / 4096.0 * 32.0
+
+M1_f32 = np.float32(M1)
+M2_f32 = np.float32(M2)
+C1_f32 = np.float32(C1)
+C2_f32 = np.float32(C2)
+C3_f32 = np.float32(C3)
+INV_M1_f32 = np.float32(1.0 / M1)
+INV_M2_f32 = np.float32(1.0 / M2)
+EPS_f32 = np.float32(1e-8)
+
+
+# ── BT.2020 YUV ↔ RGB Matrices
+MAT_BT2020_YUV2RGB = np.array([
+    [1.0,  0.0,       1.4746],
+    [1.0, -0.1646,   -0.5714],
+    [1.0,  1.8814,    0.0   ],
+], dtype=np.float32)
+
+MAT_RGB2YUV = np.linalg.inv(MAT_BT2020_YUV2RGB)
+
+
+# ── BT.2100 ICtCp Matrices
+MAT_RGB2LMS = np.array([
+    [1688, 2146, 262],
+    [683, 2951, 462],
+    [99, 309, 3688],
+], dtype=np.float32) / 4096.0
+
+MAT_LMS2RGB = np.linalg.inv(MAT_RGB2LMS)
+
+MAT_LMS2ICTCP = np.array([
+    [2048, 2048, 0],
+    [6610, -13613, 7003],
+    [17933, -17390, -543],
+], dtype=np.float32) / 4096.0
+
+MAT_ICTCP2LMS = np.linalg.inv(MAT_LMS2ICTCP)
+
+
+# ── Numpy PQ Transfer Functions (float32 precision)
+
+def eotf_pq_np(v: np.ndarray) -> np.ndarray:
+    v_pow = np.power(np.clip(v, 0.0, 1.0), INV_M2_f32)
+    num = np.maximum(v_pow - C1_f32, 0.0)
+    den = C2_f32 - C3_f32 * v_pow
+    return np.power(num / (den + EPS_f32), INV_M1_f32)
+
+
+def oetf_pq_np(l: np.ndarray) -> np.ndarray:
+    l_pow = np.power(np.clip(l, 0.0, 1.0), M1_f32)
+    num = C1_f32 + C2_f32 * l_pow
+    den = 1.0 + C3_f32 * l_pow
+    return np.power(num / den, M2_f32)
+
+
+# ── Numpy Conversions (BT.2100 ICtCp, vectorized with @)
+
+def yuv_to_ictcp_np(yuv: np.ndarray, bits: int = 8) -> np.ndarray:
+    peak = np.float32((1 << bits) - 1)
+    center = np.float32(1 << (bits - 1))
+    f = yuv.astype(np.float32)
+    f[..., 1:] -= center
+    f[..., 0] /= peak
+    f[..., 1:] /= peak
+
+    rgb_nl = f @ MAT_BT2020_YUV2RGB.T
+    rgb_lin = eotf_pq_np(rgb_nl)
+    lms = rgb_lin @ MAT_RGB2LMS.T
+    lms_p = oetf_pq_np(lms)
+    return lms_p @ MAT_LMS2ICTCP.T
+
+
+def ictcp_to_yuv_np(ictcp: np.ndarray, bits: int = 8) -> np.ndarray:
+    lms_p = ictcp @ MAT_ICTCP2LMS.T
+    lms = eotf_pq_np(lms_p)
+    rgb_lin = lms @ MAT_LMS2RGB.T
+    rgb_nl = oetf_pq_np(rgb_lin)
+    yuv_n = rgb_nl @ MAT_RGB2YUV.T
+
+    peak = np.float32((1 << bits) - 1)
+    center = np.float32(1 << (bits - 1))
+    yuv_n[..., 0] *= peak
+    yuv_n[..., 1] = yuv_n[..., 1] * peak + center
+    yuv_n[..., 2] = yuv_n[..., 2] * peak + center
+    return np.round(yuv_n).astype(np.uint8)
+
+
+def rgb_to_ictcp_np(rgb: np.ndarray) -> np.ndarray:
+    lms = rgb @ MAT_RGB2LMS.T
+    lms_p = oetf_pq_np(lms)
+    return lms_p @ MAT_LMS2ICTCP.T
+
+
+def ictcp_to_rgb_np(ictcp: np.ndarray) -> np.ndarray:
+    lms_p = ictcp @ MAT_ICTCP2LMS.T
+    lms = eotf_pq_np(lms_p)
+    return lms @ MAT_LMS2RGB.T
+
+
+# ── Torch Matrices
+
+_M_YUV2RGB = torch.tensor([
+    [1.0,  0.0,       1.4746],
+    [1.0, -0.1646,   -0.5714],
+    [1.0,  1.8814,    0.0   ],
 ])
 
-_M_YUV2RGB = torch.linalg.inv(_M_RGB2YUV)
+_M_RGB2YUV = torch.linalg.inv(_M_YUV2RGB)
 
 _M_RGB2LMS = torch.tensor([
-    [0.359283,  0.697605, -0.035891],
-    [-0.192072,  1.100477,  0.075363],
-    [0.007079,  0.074839,  0.843326],
-])
+    [1688, 2146, 262],
+    [683, 2951, 462],
+    [99, 309, 3688],
+]).float() / 4096.0
 
-_M_LMS2ICTCP = torch.tensor([
-    [0.5,         0.5,         0.0],
-    [1.613760,   -3.323486,    1.709727],
-    [4.378089,   -4.878698,    0.500608],
-])
-
-_M_ICTCP2LMS = torch.linalg.inv(_M_LMS2ICTCP)
 _M_LMS2RGB = torch.linalg.inv(_M_RGB2LMS)
 
-_M_YUV2LMS = _M_RGB2LMS @ _M_YUV2RGB
-_M_LMS2YUV = _M_RGB2YUV @ _M_LMS2RGB
+_M_LMS2ICTCP = torch.tensor([
+    [2048, 2048, 0],
+    [6610, -13613, 7003],
+    [17933, -17390, -543],
+]).float() / 4096.0
+
+_M_ICTCP2LMS = torch.linalg.inv(_M_LMS2ICTCP)
 
 _device_cache: dict = {}
 
@@ -34,64 +140,110 @@ def _get_matrices(device, dtype):
     key = (device, dtype)
     if key not in _device_cache:
         _device_cache[key] = (
-            _M_YUV2LMS.to(device=device, dtype=dtype),
+            _M_YUV2RGB.to(device=device, dtype=dtype),
+            _M_RGB2LMS.to(device=device, dtype=dtype),
             _M_LMS2ICTCP.to(device=device, dtype=dtype),
             _M_ICTCP2LMS.to(device=device, dtype=dtype),
-            _M_LMS2YUV.to(device=device, dtype=dtype),
+            _M_LMS2RGB.to(device=device, dtype=dtype),
+            _M_RGB2YUV.to(device=device, dtype=dtype),
         )
     return _device_cache[key]
 
 
+# ── Torch JIT PQ Transfer Functions (multi-channel)
+
 @torch.jit.script
-def _yuv2ictcp_jit(x, m1, m2):
+def _eotf_pq_torch(v):
+    v_clamped = torch.clamp(v, 0.0, 1.0)
+    v_pow = torch.pow(v_clamped, 1.0 / 78.84375)
+    num = torch.clamp(v_pow - (3424.0 / 4096.0), min=0.0)
+    den = (2413.0 / 4096.0 * 32.0) - (2392.0 / 4096.0 * 32.0) * v_pow
+    return torch.pow(num / (den + 1e-8), 16384.0 / 2610.0)
+
+
+@torch.jit.script
+def _oetf_pq_torch(l):
+    l_clamped = torch.clamp(l, 0.0, 1.0)
+    l_pow = torch.pow(l_clamped, 2610.0 / 16384.0)
+    num = (3424.0 / 4096.0) + (2413.0 / 4096.0 * 32.0) * l_pow
+    den = 1.0 + (2392.0 / 4096.0 * 32.0) * l_pow
+    return torch.pow(num / den, 78.84375)
+
+
+# ── Torch JIT Color Conversions (vectorized)
+
+@torch.jit.script
+def _apply_3x3(m, x):
+    B, C, H, W = x.shape
+    x_f = x.reshape(B, C, -1)
+    return torch.matmul(m, x_f).reshape(B, C, H, W)
+
+
+@torch.jit.script
+def _yuv2ictcp_jit(x, m_yuv2rgb, m_rgb2lms, m_lms2ictcp):
     yuv = (x + 1) * 127.5
-    y = yuv[:, 0]; u = yuv[:, 1] - 128.0; v = yuv[:, 2] - 128.0
-    l = m1[0, 0]*y + m1[0, 1]*u + m1[0, 2]*v
-    m = m1[1, 0]*y + m1[1, 1]*u + m1[1, 2]*v
-    s = m1[2, 0]*y + m1[2, 1]*u + m1[2, 2]*v
-    l, m, s = l / 255, m / 255, s / 255
-    l = l.sign() * l.abs().pow(1 / 2.4)
-    m = m.sign() * m.abs().pow(1 / 2.4)
-    s = s.sign() * s.abs().pow(1 / 2.4)
-    i = m2[0, 0]*l + m2[0, 1]*m + m2[0, 2]*s
-    ct = m2[1, 0]*l + m2[1, 1]*m + m2[1, 2]*s
-    cp = m2[2, 0]*l + m2[2, 1]*m + m2[2, 2]*s
-    return torch.stack([i, ct, cp], dim=1)
+    y = yuv[:, 0:1] / 255.0
+    u = (yuv[:, 1:2] - 128.0) / 255.0
+    v = (yuv[:, 2:3] - 128.0) / 255.0
+    yuv_s = torch.cat([y, u, v], dim=1)
+    rgb_nl = _apply_3x3(m_yuv2rgb, yuv_s)
+    rgb_lin = _eotf_pq_torch(rgb_nl)
+    lms = _apply_3x3(m_rgb2lms, rgb_lin)
+    lms_p = _oetf_pq_torch(lms)
+    return _apply_3x3(m_lms2ictcp, lms_p)
 
 
 @torch.jit.script
-def _ictcp2yuv_jit(x, m3, m4):
-    i = x[:, 0]; ct = x[:, 1]; cp = x[:, 2]
-    pq_l = m3[0, 0]*i + m3[0, 1]*ct + m3[0, 2]*cp
-    pq_m = m3[1, 0]*i + m3[1, 1]*ct + m3[1, 2]*cp
-    pq_s = m3[2, 0]*i + m3[2, 1]*ct + m3[2, 2]*cp
-    l = pq_l.sign() * pq_l.abs().pow(2.4)
-    m = pq_m.sign() * pq_m.abs().pow(2.4)
-    s = pq_s.sign() * pq_s.abs().pow(2.4)
-    l, m, s = l * 255, m * 255, s * 255
-    y = m4[0, 0]*l + m4[0, 1]*m + m4[0, 2]*s
-    u = m4[1, 0]*l + m4[1, 1]*m + m4[1, 2]*s + 128.0
-    v = m4[2, 0]*l + m4[2, 1]*m + m4[2, 2]*s + 128.0
-    return torch.stack([y, u, v], dim=1) / 127.5 - 1.0
+def _ictcp2yuv_jit(x, m_ictcp2lms, m_lms2rgb, m_rgb2yuv):
+    lms_p = _apply_3x3(m_ictcp2lms, x)
+    lms = _eotf_pq_torch(lms_p)
+    rgb_lin = _apply_3x3(m_lms2rgb, lms)
+    rgb_nl = _oetf_pq_torch(rgb_lin)
+    yuv = _apply_3x3(m_rgb2yuv, rgb_nl)
 
+    y = yuv[:, 0:1] * 2.0 - 1.0
+    u = yuv[:, 1:2] * 2.0
+    v = yuv[:, 2:3] * 2.0
+    return torch.cat([y, u, v], dim=1)
+
+
+@torch.jit.script
+def _rgb2ictcp_jit(x, m_rgb2lms, m_lms2ictcp):
+    lms = _apply_3x3(m_rgb2lms, x)
+    lms_p = _oetf_pq_torch(lms)
+    return _apply_3x3(m_lms2ictcp, lms_p)
+
+
+@torch.jit.script
+def _ictcp2rgb_jit(x, m_ictcp2lms, m_lms2rgb):
+    lms_p = _apply_3x3(m_ictcp2lms, x)
+    lms = _eotf_pq_torch(lms_p)
+    return _apply_3x3(m_lms2rgb, lms)
+
+
+# ── Torch Wrappers
 
 def yuv_to_ictcp(x: torch.Tensor) -> torch.Tensor:
-    m1, m2, _, _ = _get_matrices(x.device, x.dtype)
-    return _yuv2ictcp_jit(x, m1, m2)
+    m_yuv2rgb, m_rgb2lms, m_lms2ictcp, _, _, _ = _get_matrices(x.device, x.dtype)
+    return _yuv2ictcp_jit(x, m_yuv2rgb, m_rgb2lms, m_lms2ictcp)
 
 
 def ictcp_to_yuv(x: torch.Tensor) -> torch.Tensor:
-    _, _, m3, m4 = _get_matrices(x.device, x.dtype)
-    return _ictcp2yuv_jit(x, m3, m4)
+    _, _, _, m_ictcp2lms, m_lms2rgb, m_rgb2yuv = _get_matrices(x.device, x.dtype)
+    return _ictcp2yuv_jit(x, m_ictcp2lms, m_lms2rgb, m_rgb2yuv)
 
 
-def _pq(x):
-    return x.sign() * x.abs().pow(1 / 2.4)
+def rgb_to_ictcp(x: torch.Tensor) -> torch.Tensor:
+    _, m_rgb2lms, m_lms2ictcp, _, _, _ = _get_matrices(x.device, x.dtype)
+    return _rgb2ictcp_jit(x, m_rgb2lms, m_lms2ictcp)
 
 
-def _pq_inv(x):
-    return x.sign() * x.abs().pow(2.4)
+def ictcp_to_rgb(x: torch.Tensor) -> torch.Tensor:
+    _, _, _, m_ictcp2lms, m_lms2rgb, _ = _get_matrices(x.device, x.dtype)
+    return _ictcp2rgb_jit(x, m_ictcp2lms, m_lms2rgb)
 
+
+# ── Fallback Torch Conversions (non-JIT, BT.2020 YUV↔RGB only)
 
 def yuv_to_rgb(x: torch.Tensor) -> torch.Tensor:
     yuv = (x + 1) * 127.5
@@ -113,37 +265,3 @@ def rgb_to_yuv(x: torch.Tensor) -> torch.Tensor:
     u = m[1, 0] * r_ch + m[1, 1] * g_ch + m[1, 2] * b_ch + 128.0
     v = m[2, 0] * r_ch + m[2, 1] * g_ch + m[2, 2] * b_ch + 128.0
     return torch.cat([y, u, v], dim=1) / 127.5 - 1.0
-
-
-def rgb_to_ictcp(rgb: torch.Tensor) -> torch.Tensor:
-    x = (rgb + 1) / 2
-    m1 = _M_RGB2LMS.to(device=x.device, dtype=x.dtype)
-    r_ch, g_ch, b_ch = x[:, 0], x[:, 1], x[:, 2]
-    lms_l = m1[0, 0] * r_ch + m1[0, 1] * g_ch + m1[0, 2] * b_ch
-    lms_m = m1[1, 0] * r_ch + m1[1, 1] * g_ch + m1[1, 2] * b_ch
-    lms_s = m1[2, 0] * r_ch + m1[2, 1] * g_ch + m1[2, 2] * b_ch
-    pq_l = _pq(lms_l)
-    pq_m = _pq(lms_m)
-    pq_s = _pq(lms_s)
-    m2 = _M_LMS2ICTCP.to(device=x.device, dtype=x.dtype)
-    i_ch = m2[0, 0] * pq_l + m2[0, 1] * pq_m + m2[0, 2] * pq_s
-    ct_ch = m2[1, 0] * pq_l + m2[1, 1] * pq_m + m2[1, 2] * pq_s
-    cp_ch = m2[2, 0] * pq_l + m2[2, 1] * pq_m + m2[2, 2] * pq_s
-    return torch.stack([i_ch, ct_ch, cp_ch], dim=1)
-
-
-def ictcp_to_rgb(ictcp: torch.Tensor) -> torch.Tensor:
-    x = ictcp
-    m_inv = _M_ICTCP2LMS.to(device=x.device, dtype=x.dtype)
-    i_ch, ct_ch, cp_ch = x[:, 0], x[:, 1], x[:, 2]
-    pq_l = m_inv[0, 0] * i_ch + m_inv[0, 1] * ct_ch + m_inv[0, 2] * cp_ch
-    pq_m = m_inv[1, 0] * i_ch + m_inv[1, 1] * ct_ch + m_inv[1, 2] * cp_ch
-    pq_s = m_inv[2, 0] * i_ch + m_inv[2, 1] * ct_ch + m_inv[2, 2] * cp_ch
-    lms_l = _pq_inv(pq_l)
-    lms_m = _pq_inv(pq_m)
-    lms_s = _pq_inv(pq_s)
-    m_rgb = _M_LMS2RGB.to(device=x.device, dtype=x.dtype)
-    r_ch = m_rgb[0, 0] * lms_l + m_rgb[0, 1] * lms_m + m_rgb[0, 2] * lms_s
-    g_ch = m_rgb[1, 0] * lms_l + m_rgb[1, 1] * lms_m + m_rgb[1, 2] * lms_s
-    b_ch = m_rgb[2, 0] * lms_l + m_rgb[2, 1] * lms_m + m_rgb[2, 2] * lms_s
-    return torch.stack([r_ch, g_ch, b_ch], dim=1) * 2 - 1

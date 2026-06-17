@@ -6,27 +6,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import av
-import cv2
 import numpy as np
 import torch
 from yaml import safe_load
 
 from models import MambaFixer
-from utils.video_loader import load_video_frames
-
-
-def _yuv_to_rgb(x: torch.Tensor) -> torch.Tensor:
-    y = (x[:, 0:1] + 1) * 127.5
-    u_centered = (x[:, 1:2] + 1) * 127.5 - 128.0
-    v_centered = (x[:, 2:3] + 1) * 127.5 - 128.0
-    r = y + 1.402 * v_centered
-    g = y - 0.344 * u_centered - 0.714 * v_centered
-    b = y + 1.772 * u_centered
-    return torch.cat([r, g, b], dim=1) / 127.5 - 1.0
-
-
-def _yuv_np_to_rgb_np(yuv: np.ndarray) -> np.ndarray:
-    return cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB)
+from models.components import yuv_to_ictcp, ictcp_to_yuv, yuv_to_rgb
+from utils.video_loader import frame_to_yuv
 
 
 def parse_args():
@@ -75,19 +61,15 @@ def main():
         model.reset_state(1, device)
 
         for frame in container.decode(video=0):
-            # Convert to YUV444
-            y = np.frombuffer(frame.planes[0], np.uint8).reshape(frame.height, frame.planes[0].line_size)[:, :frame.width]
-            u = cv2.resize(np.frombuffer(frame.planes[1], np.uint8).reshape(frame.height//2, frame.planes[1].line_size)[:, :frame.width//2], (w, h), interpolation=cv2.INTER_LINEAR)
-            v = cv2.resize(np.frombuffer(frame.planes[2], np.uint8).reshape(frame.height//2, frame.planes[2].line_size)[:, :frame.width//2], (w, h), interpolation=cv2.INTER_LINEAR)
-            f_np = np.stack([y, u, v], axis=-1)
+            f_np = frame_to_yuv(frame)
             
             f = torch.from_numpy(f_np).float().permute(2, 0, 1).unsqueeze(0).to(device) / 127.5 - 1.0
-            pred = model(f)
-            pred_np = (pred.squeeze(0).permute(1, 2, 0).cpu().float() + 1) * 127.5
+            pred = ictcp_to_yuv(model(yuv_to_ictcp(f)))
+            pred_rgb = yuv_to_rgb(pred)
+            pred_np = (pred_rgb.squeeze(0).permute(1, 2, 0).cpu().float() + 1) * 127.5
             pred_np = pred_np.clamp(0, 255).numpy().astype(np.uint8)
             
-            rgb = cv2.cvtColor(pred_np, cv2.COLOR_YUV2RGB)
-            out_frame = av.VideoFrame.from_ndarray(rgb, format='rgb24')
+            out_frame = av.VideoFrame.from_ndarray(pred_np, format='rgb24')
             for packet in stream_out.encode(out_frame):
                 container_out.mux(packet)
 

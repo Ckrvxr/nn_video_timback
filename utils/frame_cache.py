@@ -6,19 +6,110 @@ import cv2
 import numpy as np
 
 from .blosc_cache import BloscCache
-from .video_loader import load_video_frames_raw
+
+
+class LazyFrameRange:
+    """Indexable, lazily-loaded frame sequence backed by BloscCache.
+
+    Frames are fetched on demand and cached in a sliding window so that
+    memory stays proportional to ``window_size`` frames rather than the
+    full video length.
+
+    ``__getitem__`` and ``__len__`` behave like a list, making it a
+    drop-in replacement for the old pre-loaded frame lists.
+    """
+
+    def __init__(self, blosc_cache: BloscCache | None, video_path: str,
+                 n_frames: int, window_size: int = 17):
+        self._bc = blosc_cache
+        self._path = video_path
+        self._n = n_frames
+        self._ws = window_size
+        self._cache: dict[int, np.ndarray] = {}
+
+    # ── list-like interface ──────────────────────────────────────────
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, idx: int | slice) -> np.ndarray | list[np.ndarray]:
+        if isinstance(idx, slice):
+            return [self[i] for i in range(*idx.indices(self._n))]
+
+        if idx < 0:
+            idx += self._n
+        if idx < 0 or idx >= self._n:
+            raise IndexError(
+                f'Frame index {idx} out of range [0, {self._n})')
+
+        if idx in self._cache:
+            return self._cache[idx]
+
+        self._evict_outside(idx)
+        frame = self._fetch(idx)
+        self._cache[idx] = frame
+        return frame
+
+    # ── window management ───────────────────────────────────────────
+
+    def _evict_outside(self, new_idx: int):
+        half = self._ws // 2
+        lo = max(0, new_idx - half)
+        hi = min(self._n, lo + self._ws)
+        if hi - lo < self._ws:
+            lo = max(0, hi - self._ws)
+
+        for k in list(self._cache.keys()):
+            if k < lo or k >= hi:
+                del self._cache[k]
+
+    def _fetch(self, idx: int) -> np.ndarray:
+        if self._bc is not None:
+            frame = self._bc.get_frame(self._path, idx)
+            if frame is not None:
+                return frame
+        return self._fetch_live(idx)
+
+    def _fetch_live(self, idx: int) -> np.ndarray:
+        """Decode YUV→ICtCp from video file, caching a window around idx."""
+        from .video_loader import load_video_frame_range
+        from models.components.color_space import yuv_to_ictcp_np
+
+        half = self._ws // 2
+        lo = max(0, idx - half)
+        hi = min(self._n, lo + self._ws)
+        if hi - lo < self._ws:
+            lo = max(0, hi - self._ws)
+
+        yuv_frames = load_video_frame_range(self._path, lo, hi)
+        batch = np.stack(yuv_frames, axis=0)
+
+        bits = 8
+        if batch.dtype == np.uint16:
+            max_val = int(batch.max())
+            bits = 12 if max_val > 1023 else 10
+
+        ictcp_frames = yuv_to_ictcp_np(batch, bits=bits)
+
+        for j in range(len(ictcp_frames)):
+            self._cache[lo + j] = ictcp_frames[j]
+        return self._cache[idx]
+
+    def clear(self):
+        self._cache.clear()
 
 
 class FrameCache:
-    """Per-worker LRU cache for decoded video frames.
+    """Per-process singleton that provides lazy frame access.
 
-    Supports two modes:
-      *decode_allowed=True*  — fallback to PyAV when BloscCache misses.
-                                Used only during pre-warming in the main process.
-      *decode_allowed=False* — BloscCache-only.  If the .blp file does not
-                                exist, raises RuntimeError.  This is the
-                                worker-mode (training) which must never block
-                                on expensive video decoding.
+    To use:
+
+    >>> fc = FrameCache()
+    >>> fc.set_cache_root('data/datasets/foo/cache_yuv')
+    >>> hr, lr = fc.get_or_load_frames('/path/to/HR/vid.mp4',
+    ...                                '/path/to/LR/vid.mp4',
+    ...                                n_frames=120)
+    >>> frame = hr[42]       # lazy-loads frame 42
     """
 
     _instance = None
@@ -32,101 +123,26 @@ class FrameCache:
                     cls._instance._init()
         return cls._instance
 
-    def _init(self, max_videos=None):
-        self._cache = {}
-        self._order = []
-        self._max_videos = int(max_videos) if max_videos is not None else int(
-            os.environ.get('FRAME_CACHE_MAX_VIDEOS', 3))
+    def _init(self):
         self._blosc_cache = None
-        self._cache_lock = threading.Lock()
         self._decode_allowed = True
 
     def set_cache_root(self, cache_root: str | Path | None):
         self._blosc_cache = BloscCache(cache_root) if cache_root else None
 
     def set_decode_allowed(self, allowed: bool):
-        """When False, _load() reads BloscCache only — no PyAV fallback."""
         self._decode_allowed = allowed
 
-    def _load(self, video_path: str) -> list[np.ndarray]:
-        """Load video frames, preferring BloscCache over PyAV decoding.
+    def get_or_load_frames(self, hr_path: str | Path, lr_path: str | Path,
+                           n_frames: int, window_size: int = 17
+                           ) -> tuple[LazyFrameRange, LazyFrameRange]:
+        """Return lazy frame ranges for HR and LR.
 
-        Raises RuntimeError if BloscCache misses and decoding is not allowed
-        (worker mode).
+        No frames are loaded until the returned objects are indexed.
         """
-        # ── BloscCache hit path (fast) ──
-        if self._blosc_cache:
-            result = self._blosc_cache.get(video_path)
-            if result is not None:
-                arr, h, w, n_frames = result
-                return self._blp_to_yuv444(arr, h, w, n_frames)
-
-        # ── Decode path (slow — only in pre-warm phase) ──
-        if self._decode_allowed:
-            raw_frames = load_video_frames_raw(video_path)
-            if self._blosc_cache:
-                try:
-                    self._blosc_cache.put_raw(video_path, raw_frames)
-                except Exception:
-                    pass
-            return self._raw_to_yuv444(raw_frames)
-
-        # ── Worker mode: BloscCache miss + decode prohibited ──
-        raise RuntimeError(
-            f'BloscCache miss for {video_path} in worker mode. '
-            'Run training with warm_cache=True or manually run '
-            'scripts/precache_frames.py first.'
-        )
-
-    @staticmethod
-    def _blp_to_yuv444(arr_1d: np.ndarray, h: int, w: int, n_frames: int) -> list[np.ndarray]:
-        """Convert YYYYY-UUUUU-VVVVV 1D array → list of YUV444 frames."""
-        n = h * w
-        n_uv = (h // 2) * (w // 2)
-        y_all = arr_1d[:n_frames * n].reshape(n_frames, h, w)
-        u_all = arr_1d[n_frames * n: n_frames * (n + n_uv)].reshape(n_frames, h // 2, w // 2)
-        v_all = arr_1d[n_frames * (n + n_uv): n_frames * (n + 2 * n_uv)].reshape(
-            n_frames, h // 2, w // 2)
-        out = []
-        for i in range(n_frames):
-            u = cv2.resize(u_all[i], (w, h), interpolation=cv2.INTER_LINEAR)
-            v = cv2.resize(v_all[i], (w, h), interpolation=cv2.INTER_LINEAR)
-            out.append(np.stack([y_all[i], u, v], axis=-1))
-        return out
-
-    @staticmethod
-    def _raw_to_yuv444(raw_frames: list) -> list[np.ndarray]:
-        """Convert list of (Y,U,V) tuples → list of YUV444 frames."""
-        out = []
-        for y, u, v in raw_frames:
-            h, w = y.shape
-            u = cv2.resize(u, (w, h), interpolation=cv2.INTER_LINEAR)
-            v = cv2.resize(v, (w, h), interpolation=cv2.INTER_LINEAR)
-            out.append(np.stack([y, u, v], axis=-1))
-        return out
-
-    def get_or_load(self, hr_path: Path, lr_path: Path):
-        key = (str(hr_path), str(lr_path))
-
-        with self._cache_lock:
-            if key in self._cache:
-                self._order.remove(key)
-                self._order.append(key)
-                return self._cache[key]
-
-        # Heavy I/O / decompression happens outside the lock.
-        hr_frames = self._load(str(hr_path))
-        lr_frames = self._load(str(lr_path))
-
-        with self._cache_lock:
-            self._cache[key] = (hr_frames, lr_frames)
-            self._order.append(key)
-            if len(self._order) > self._max_videos:
-                victim = self._order.pop(0)
-                del self._cache[victim]
-            return hr_frames, lr_frames
+        hr = LazyFrameRange(self._blosc_cache, str(hr_path), n_frames, window_size)
+        lr = LazyFrameRange(self._blosc_cache, str(lr_path), n_frames, window_size)
+        return hr, lr
 
     def clear(self):
-        with self._cache_lock:
-            self._cache.clear()
-            self._order.clear()
+        pass

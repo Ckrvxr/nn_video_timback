@@ -29,15 +29,15 @@ _FFMPEG_PATH = _find_ffmpeg()
 
 @torch.no_grad()
 def compute_vmaf(
-    pred: torch.Tensor,
-    ref: torch.Tensor,
+    pred_yuv: torch.Tensor,
+    ref_yuv: torch.Tensor,
     tmpdir: str | None = None,
     ffmpeg_path: str | None = None,
 ) -> float:
     if ffmpeg_path is None:
         ffmpeg_path = _FFMPEG_PATH
-    pred_rgb = yuv_to_rgb(pred).cpu().numpy()
-    ref_rgb = yuv_to_rgb(ref).cpu().numpy()
+    pred_rgb = yuv_to_rgb(pred_yuv).cpu().numpy()
+    ref_rgb = yuv_to_rgb(ref_yuv).cpu().numpy()
 
     pred_u8 = ((pred_rgb + 1) * 127.5).clip(0, 255).astype(np.uint8)
     ref_u8 = ((ref_rgb + 1) * 127.5).clip(0, 255).astype(np.uint8)

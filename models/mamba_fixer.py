@@ -55,9 +55,8 @@ class MambaFixer(nn.Module):
         elif self._t_state.shape[0] != B:
             self._t_state = self._t_state[:1].expand(B, -1).contiguous()
 
-    def forward_ssm(self, x: torch.Tensor, pre_ictcp: bool = False) -> torch.Tensor:
-        ictcp = x if pre_ictcp else yuv_to_ictcp(x)
-        return self.forward_ssm_ictcp(ictcp)
+    def forward_ssm(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_ssm_ictcp(x)
 
     def forward_ssm_ictcp(self, ictcp: torch.Tensor) -> torch.Tensor:
         B = ictcp.shape[0]
@@ -98,19 +97,16 @@ class MambaFixer(nn.Module):
                 final_output[batch_indices] = inp + torch.cat([delta_i, delta_ct, delta_cp], dim=1)
         return final_output
 
-    def forward(self, x: torch.Tensor, ssm_only: bool = False, pre_ictcp: bool = False) -> torch.Tensor | None:
-        ictcp = x if pre_ictcp else yuv_to_ictcp(x)
-
-        z_t = self.forward_ssm_ictcp(ictcp)
+    def forward(self, x: torch.Tensor, ssm_only: bool = False) -> torch.Tensor | None:
+        z_t = self.forward_ssm_ictcp(x)
 
         if ssm_only:
             return None
 
-        idx, logits = self.router(z_t, ictcp)
+        idx, logits = self.router(z_t, x)
 
         self._last_expert_idx = idx.detach().cpu()
         self._balancing_loss = self.router.load_balancing_loss(logits)
 
-        cleaned_ictcp = self.apply_experts(ictcp, idx)
-
-        return ictcp_to_yuv(cleaned_ictcp)
+        cleaned_ictcp = self.apply_experts(x, idx)
+        return cleaned_ictcp
