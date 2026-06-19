@@ -14,8 +14,8 @@ graph TD
     Input["输入视频帧 (B, 3, H, W)<br>色彩空间: ICtCp"] --> SplitChannels["分离通道 (I, Ct, Cp)"]
     
     %% Temporal (SSM) Path
-    SplitChannels -->|"亮度通道 I (B, 1, H, W)"| Downsample["DownsampleChain<br>(裁切为正方形, 缩放至 256x256, 经过两层 3x3 Conv 步长 2 输出)"]
-    Downsample -->|"输出特征图 (B, nf, 64, 64)"| Flatten["特征平铺<br>(B, 4096, nf)"]
+    SplitChannels -->|"亮度通道 I (B, 1, H, W)"| Downsample["DownsampleChain<br>(裁切为正方形, 缩放至 256x256, 经过四层 3x3 Conv 步长 2 输出)"]
+    Downsample -->|"输出特征图 (B, nf, 16, 16)"| Flatten["特征平铺<br>(B, 256, nf)"]
     Flatten --> SSMFwd["ssm_fwd (前向 FastSSM)"]
     Flatten --> SSMBwd["ssm_bwd (后向 FastSSM)"]
     SSMFwd -->|"取末尾 Token"| ZFwd["z_fwd (B, nf)"]
@@ -60,8 +60,8 @@ graph TD
 该分支旨在捕获视频的空间特征以及长期时间跨度上的帧间一致性。
 - **3x3 卷积降采样特征嵌入**：
   - [DownsampleChain](file:///C:/Users/Ckrvxr/MyProject/nn_video_timback/models/components/downsample.py) 先将输入亮度通道 $I$（若非正方形则中心裁剪）通过插值调整分辨率至 $256 \times 256$。
-  - 接着依次通过两个 $3 \times 3$ 步长为 2 的卷积层（结合 ReLU 激活）进行下采样与多维嵌入，将其转换为形状为 $[B, nf, 64, 64]$ 的低分辨率多维特征图。
-  - 随后展平为序列 $[B, 4096, nf]$ 送入 SSM。
+  - 接着依次通过四个 $3 \times 3$ 步长为 2 的卷积层（结合 ReLU 激活）进行下采样与多维嵌入，将其转换为形状为 $[B, nf, 16, 16]$ 的低分辨率多维特征图。
+  - 随后展平为序列 $[B, 256, nf]$ 送入 SSM。
 - **双向空间序列处理器**：
   - 由 `ssm_fwd` 与 `ssm_bwd` 对该序列分别进行正向与反向扫描，使用自定义的 [FastSSM](file:///C:/Users/Ckrvxr/MyProject/nn_video_timback/models/components/fast_ssm.py) 处理。
   - 对正向与反向的特征序列进行全局平均池化（Mean Pooling），拼接池化后的特征并通过线性映射 `ssm_proj` 投影回 $nf$ 维。

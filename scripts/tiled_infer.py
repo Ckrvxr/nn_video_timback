@@ -20,7 +20,9 @@ def tiled_mamba_inference(model, x, tile_size=1024, overlap=64):
     ictcp = yuv_to_ictcp(x)
     # 1. Global SSM pass on downsampled frame (to maintain sequence state correctly)
     z_t = model.forward_ssm_ictcp(ictcp)
-    idx, _ = model.router(z_t)
+    z_spatial = model.spatial_stats(ictcp[:, 0:1])
+    router_in = torch.cat([z_t, z_spatial], dim=-1)
+    idx, weights, _ = model.router(router_in, ictcp, k=model.n_active, threshold=model.routing_threshold)
     
     # 2. Tiled Expert application (where the OOM usually happens)
     B, C, H, W = ictcp.shape
@@ -34,7 +36,7 @@ def tiled_mamba_inference(model, x, tile_size=1024, overlap=64):
             x_start = max(0, x_end - tile_size)
             
             tile = ictcp[:, :, y_start:y_end, x_start:x_end]
-            tile_out = model.apply_experts(tile, idx)
+            tile_out = model.apply_experts(tile, idx, weights)
             
             # Stitching with half-overlap crop
             out_y_start = y_start + (overlap // 2 if y_start > 0 else 0)
