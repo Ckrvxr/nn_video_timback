@@ -11,8 +11,6 @@ dataset:
   validation_batch_size: 2
   num_workers: 0
   validation_num_workers: 0
-  warm_cache_on_startup: true
-  max_videos_in_cache: 1
   shuffle_variants: false
   clip_repeat_factor: 1
 
@@ -23,6 +21,7 @@ model_architecture:
   num_features_stream: 2
   num_experts: 4
   dilation_rates: [1, 2, 4]
+  routing_threshold: 0.90
 
 training_settings:
   batch_size: 2

@@ -81,6 +81,14 @@ try:
 except ImportError:
     psutil = None
 import torch
+# ── Triton compat: inductor expects triton_key() which was removed in triton ≥3.7
+try:
+    import triton
+    import triton.compiler.compiler as _tcc
+    if not hasattr(_tcc, 'triton_key'):
+        _tcc.triton_key = lambda: triton.__version__
+except ImportError:
+    pass
 warnings.filterwarnings('ignore', message='Cannot set number of intraop threads')
 warnings.filterwarnings('ignore', message='Detected call of `lr_scheduler.step\\(\\)` before `optimizer.step\\(\\)`')
 import torch.nn as nn
@@ -223,6 +231,7 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     model.train()
     total_loss = 0.0
     n_batches = len(loader)
+    n_samples = len(loader.dataset)
     
     training_cfg = config['training_settings']
     model_cfg = config['model_architecture']
@@ -248,7 +257,7 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     if is_mamba:
         model.reset_state(bs or 1, device)
 
-    pbar = tqdm(total=n_batches, desc="Training", unit="batch", leave=False, miniters=10)
+    pbar = tqdm(total=n_samples, desc="Training", unit="sample", leave=False, miniters=10)
     t_batch_start = time.perf_counter()
     optimizer.zero_grad(set_to_none=True)
 
@@ -302,7 +311,7 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                     if t == center_idx:
                         pred = model(lr[:, t].to(memory_format=torch.channels_last))
                         loss_dict = criterion(pred, hr.to(memory_format=torch.channels_last))
-                        loss_dict['moe'] = model._balancing_loss * 0.1 if getattr(model, '_balancing_loss', None) is not None else torch.tensor(0.0, device=device)
+                        loss_dict['moe'] = model._balancing_loss * 1.0 if getattr(model, '_balancing_loss', None) is not None else torch.tensor(0.0, device=device)
                         if hasattr(model, '_balancing_loss'):
                             model._balancing_loss = None  # Clear graph reference immediately
                         loss_dict['total'] = loss_dict['total'] + loss_dict['moe']
@@ -312,8 +321,9 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                             model(lr[:, t].to(memory_format=torch.channels_last), ssm_only=True)
                 
                 if hasattr(model, '_last_expert_idx'):
-                    expert_counts.index_add_(0, model._last_expert_idx.cpu(),
-                                             torch.ones_like(model._last_expert_idx, dtype=torch.float))
+                    idx_flat = model._last_expert_idx.cpu().flatten()
+                    expert_counts.index_add_(0, idx_flat,
+                                             torch.ones_like(idx_flat, dtype=torch.float))
                 model._t_state = model._t_state.detach()
                 
             else:
@@ -326,8 +336,9 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                 loss_dict['total'] = loss_dict['total'] + loss_dict['moe']
                 loss = loss_dict['total'] / grad_accum
                 if hasattr(model, '_last_expert_idx'):
-                    expert_counts.index_add_(0, model._last_expert_idx.cpu(),
-                                             torch.ones_like(model._last_expert_idx, dtype=torch.float))
+                    idx_flat = model._last_expert_idx.cpu().flatten()
+                    expert_counts.index_add_(0, idx_flat,
+                                             torch.ones_like(idx_flat, dtype=torch.float))
             return loss, loss_dict
 
         # Save initial Mamba state for the second pass of SAM
@@ -445,7 +456,7 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
             if total_selections > 0:
                 n_experts = expert_counts.size(0)
                 console.info(f"\n🏆 Expert Heatmap (Batch {batch_idx + 1}/{n_batches})")
-                console.info("─" * 95)
+                console.info("─" * 130)
 
                 def heat_color(pct):
                     if pct >= 20: return "red"
@@ -454,9 +465,9 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                     if pct >= 1:  return "blue"
                     return "white"
 
-                for row_start in range(0, n_experts, 7):
+                for row_start in range(0, n_experts, 10):
                     cells = []
-                    for offset in range(7):
+                    for offset in range(10):
                         idx = row_start + offset
                         if idx >= n_experts:
                             break
@@ -482,23 +493,11 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
 
         samples_sec = bs / batch_time if batch_time > 0 else 0
         
-        # Format Top-3 experts for tqdm postfix
-        total_sel = expert_counts.sum().item()
-        if total_sel > 0:
-            top_val, top_idx = torch.topk(expert_counts, k=min(3, len(expert_counts)))
-            top_str = ",".join([f"E{idx.item()}" for idx, val in zip(top_idx, top_val) if val > 0])
-        else:
-            top_str = "None"
-            
         pbar.set_postfix(
-            loss=f"{batch_loss:.4f}",
-            char=f"{loss_dict.get('char', torch.tensor(0.0)).item():.4f}",
-            fft=f"{loss_dict.get('fft', torch.tensor(0.0)).item():.4f}",
-            moe=f"{loss_dict.get('moe', torch.tensor(0.0)).item():.4f}",
-            top=top_str,
-            samples=f"{samples_sec:.0f}/s"
+            total=f"{batch_loss:.6f}",
+            **{k: f"{v.item():.6f}" for k, v in loss_dict.items() if k != 'total'},
         )
-        pbar.update(1)
+        pbar.update(bs)
 
         if device.type == 'cuda' and (batch_idx + 1) % cuda_cache_interval == 0:
             torch.cuda.empty_cache()
@@ -583,6 +582,7 @@ def main():
     model_cfg = config['model_architecture']
     training_cfg = config['training_settings']
     dataset_cfg = config['dataset']
+    data_type = dataset_cfg.get('data_type', 'compressed')
     logging_cfg = config['logging_settings']
 
     model_name = model_cfg.get('model_name', 'hyper_fixer')
@@ -599,11 +599,16 @@ def main():
             num_experts=model_cfg.get('num_experts', 100),
             n_active=model_cfg.get('n_active', 4),
             dilation_rates=model_cfg.get('dilation_rates', [1, 2, 4, 32]),
+            routing_threshold=model_cfg.get('routing_threshold', 1.0),
         ).to(device, memory_format=torch.channels_last)
 
     if training_cfg.get('enable_torch_compile', False):
-        console.info('Using torch.compile')
-        model = torch.compile(model, mode='max-autotune')
+        console.info('Compiling model with torch.compile (reduce-overhead)...')
+        try:
+            model = torch.compile(model, mode='reduce-overhead')
+        except Exception as e:
+            console.warning(f'Compilation failed: {e}')
+            console.warning('Falling back to uncompiled model')
 
     criterion = CompositeLoss(config['loss_weights'], device=device)
 
@@ -644,21 +649,34 @@ def main():
         ckpt = torch.load(args.pretrained, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt)
 
-    multiple_datasets = len(dataset_cfg['dataset_paths']) > 1
     train_loader = None
     val_loader = None
 
-    if not multiple_datasets:
-        train_loader = create_dataloader(
-            datasets=dataset_cfg['dataset_paths'],
-            batch_size=training_cfg['batch_size'],
+    val_dataset_path = dataset_cfg.get('val_dataset_path')
+    if val_dataset_path:
+        val_loader = create_dataloader(
+            datasets=[val_dataset_path],
+            batch_size=dataset_cfg.get('validation_batch_size', 2),
             patch_size=dataset_cfg['patch_size'],
             frames=dataset_cfg['num_frames'],
-            workers=dataset_cfg['num_workers'],
-            is_train=True,
-            clip_repeat=dataset_cfg.get('clip_repeat_factor', 1),
-            sequential=dataset_cfg.get('sequential_mode', False),
+            workers=dataset_cfg.get('validation_num_workers', 2),
+            is_train=False,
+            shuffle=True,
+            data_type=data_type,
         )
+
+    train_loader = create_dataloader(
+        datasets=dataset_cfg['dataset_paths'],
+        batch_size=training_cfg['batch_size'],
+        patch_size=dataset_cfg['patch_size'],
+        frames=dataset_cfg['num_frames'],
+        workers=dataset_cfg['num_workers'],
+        is_train=True,
+        clip_repeat=dataset_cfg.get('clip_repeat_factor', 1),
+        sequential=dataset_cfg.get('sequential_mode', False),
+        data_type=data_type,
+    )
+    if val_loader is None:
         val_loader = create_dataloader(
             datasets=dataset_cfg['dataset_paths'],
             batch_size=dataset_cfg.get('validation_batch_size', 2),
@@ -666,6 +684,7 @@ def main():
             frames=dataset_cfg['num_frames'],
             workers=dataset_cfg.get('validation_num_workers', 2),
             is_train=False,
+            data_type=data_type,
         )
 
     global RUN_DIR
@@ -680,6 +699,27 @@ def main():
     console.info(f"Training run directory created: {run_dir}")
     console.info(f"To PAUSE training: press Ctrl+C and choose [p], or create file '{run_dir}/.pause'")
     console.info(f"To EXIT gracefully: press Ctrl+C and choose [s], or create file '{run_dir}/.exit'")
+
+    # ── Baseline (untrained model, cached across runs) ────────────
+    if val_loader is not None:
+        baseline_path = output_dir / 'baseline.json'
+        if baseline_path.exists():
+            baseline = json.load(open(baseline_path))
+            console.info(f"Baseline loaded from cache: psnr={baseline['psnr']:.2f} "
+                         f"| ssim={baseline['ssim']:.4f} | vmaf={baseline['vmaf']:.4f}")
+        else:
+            console.info("Running baseline on validation set (untrained model)...")
+            b_psnr, b_ssim, b_vmaf = validate(model, val_loader, device,
+                                               num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
+            baseline = {'psnr': b_psnr, 'ssim': b_ssim, 'vmaf': b_vmaf}
+            json.dump(baseline, open(baseline_path, 'w'))
+            console.info(f"Baseline: psnr={b_psnr:.2f} | ssim={b_ssim:.4f} | vmaf={b_vmaf:.4f}")
+        # Copy to run_dir for per-run metrics
+        json.dump(baseline, open(run_dir / 'baseline.json', 'w'))
+        console.info("─" * 60)
+    else:
+        console.info("No validation set configured, skipping baseline.")
+        console.info("─" * 60)
 
     try:
         for epoch in range(start_epoch, n_epochs):
@@ -719,53 +759,7 @@ def main():
                 console.warning(f"Training gracefully stopped. Saved checkpoint for epoch {max(0, epoch - 1)}.")
                 break
 
-            if multiple_datasets:
-                epoch_loss = 0.0
-                total_batches = 0
-                for ds_path in dataset_cfg['dataset_paths']:
-                    if run_dir:
-                        pause_file = run_dir / '.pause'
-                        exit_file = run_dir / '.exit'
-                        if exit_file.exists() or EXIT_FLAG:
-                            EXIT_FLAG = True
-                            break
-                        was_paused = False
-                        first_pause_msg = True
-                        while pause_file.exists() and not EXIT_FLAG:
-                            was_paused = True
-                            if first_pause_msg:
-                                console.warning(f"\nTraining paused (.pause file found in {run_dir}). Delete the file to resume.")
-                                first_pause_msg = False
-                            time.sleep(1.0)
-                            if exit_file.exists():
-                                EXIT_FLAG = True
-                        if was_paused and not EXIT_FLAG:
-                            console.success("Resuming training...")
-                    
-                    if EXIT_FLAG:
-                        break
-
-                    ds_loader = create_dataloader(
-                        datasets=[ds_path],
-                        batch_size=training_cfg['batch_size'],
-                        patch_size=dataset_cfg['patch_size'],
-                        frames=dataset_cfg['num_frames'],
-                        workers=dataset_cfg['num_workers'],
-                        is_train=True,
-                        clip_repeat=dataset_cfg.get('clip_repeat_factor', 1),
-                        sequential=dataset_cfg.get('sequential_mode', False),
-                        persistent_workers=False,
-                    )
-                    
-                    ds_loss = train_epoch(model, ds_loader, criterion, optimizer, device, config, scaler, run_dir=run_dir)
-                    epoch_loss += ds_loss * len(ds_loader)
-                    total_batches += len(ds_loader)
-                    
-                    del ds_loader
-                
-                train_loss = epoch_loss / total_batches if total_batches > 0 else 0.0
-            else:
-                train_loss = train_epoch(model, train_loader, criterion, optimizer, device, config, scaler, run_dir=run_dir)
+            train_loss = train_epoch(model, train_loader, criterion, optimizer, device, config, scaler, run_dir=run_dir)
 
             scheduler.step()
 
@@ -777,37 +771,13 @@ def main():
             if epoch % logging_cfg.get('validation_interval', 1) == 0:
                 if logging_cfg.get('empty_cuda_cache_on_validation', False):
                     torch.cuda.empty_cache()
+
+                psnr, ssim, vmaf = validate(
+                    model, val_loader, device,
+                    num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
                 
-                if multiple_datasets:
-                    total_psnr = 0.0
-                    total_ssim = 0.0
-                    total_vmaf = 0.0
-                    val_datasets = dataset_cfg['dataset_paths']
-                    for ds_path in val_datasets:
-                        if EXIT_FLAG:
-                            break
-                        ds_val_loader = create_dataloader(
-                            datasets=[ds_path],
-                            batch_size=dataset_cfg.get('validation_batch_size', 2),
-                            patch_size=dataset_cfg['patch_size'],
-                            frames=dataset_cfg['num_frames'],
-                            workers=dataset_cfg.get('validation_num_workers', 2),
-                            is_train=False,
-                            persistent_workers=False,
-                        )
-                        psnr, ssim, vmaf = validate(model, ds_val_loader, device, num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
-                        total_psnr += psnr
-                        total_ssim += ssim
-                        total_vmaf += vmaf
-                        del ds_val_loader
-                    
-                    psnr = total_psnr / len(val_datasets)
-                    ssim = total_ssim / len(val_datasets)
-                    vmaf = total_vmaf / len(val_datasets)
-                else:
-                    psnr, ssim, vmaf = validate(model, val_loader, device, num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
-                
-                console.info(f'Epoch {epoch}: loss={train_loss:.4f} | psnr={psnr:.2f} | ssim={ssim:.4f}')
+                vmaf_str = f' | vmaf={vmaf:.4f}' if vmaf > 0 else ''
+                console.info(f'Epoch {epoch}: loss={train_loss:.4f} | psnr={psnr:.2f} | ssim={ssim:.4f}{vmaf_str}')
                 
                 if logging_cfg.get('empty_cuda_cache_on_validation', False):
                     torch.cuda.empty_cache()

@@ -2,17 +2,17 @@ output_directory: runs/mamba
 random_seed: 42
 
 dataset:
+  data_type: preprocessed
   dataset_paths: [
-             ./data/datasets/realisvideo-4k
+             ./data/violet
     ]
+  val_dataset_path: ./data/violet_val
   patch_size: 512
   num_frames: 9
   sequential_mode: true
   validation_batch_size: 2
-  num_workers: 2
-  validation_num_workers: 2
-  warm_cache_on_startup: true
-  max_videos_in_cache: 1
+  num_workers: 1
+  validation_num_workers: 0
   shuffle_variants: true
   clip_repeat_factor: 1
 
@@ -22,13 +22,14 @@ model_architecture:
   state_dimension: 32
   num_features_stream: 2
   num_experts: 100
-  n_active: 4
+  n_active: 2
   dilation_rates: [1, 2, 4, 32]
+  routing_threshold: 0.90
 
 training_settings:
-  batch_size: 4
+  batch_size: 1
   num_epochs: 20
-  learning_rate: 2.0e-4
+  learning_rate: 5.0e-5
   min_learning_rate: 1.0e-6
   weight_decay: 1.0e-4
   adam_beta1: 0.9
@@ -37,7 +38,7 @@ training_settings:
   use_mixed_precision: true
   gradient_accumulation_steps: 2
   enable_torch_compile: false
-  enable_sam: true
+  enable_sam: false
   sam_rho: 0.05
 
 loss_weights:

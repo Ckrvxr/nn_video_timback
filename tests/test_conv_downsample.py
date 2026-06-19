@@ -30,5 +30,31 @@ def test_mamba_fixer_forward():
     assert out.shape == (2, 3, 32, 32), f"Expected shape (2, 3, 32, 32), got {out.shape}"
     print("Test passed successfully!")
 
+def test_mamba_fixer_adaptive_routing():
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print("Initializing MambaFixer with adaptive routing (threshold=0.85)...")
+    model = MambaFixer(
+        num_features=16,
+        state_dimension=8,
+        num_features_stream=2,
+        num_experts=10,
+        n_active=4,
+        routing_threshold=0.85
+    ).to(device)
+    model.eval()
+    
+    x = torch.randn(2, 3, 32, 32, device=device)
+    model.reset_state(2, device)
+    
+    print("Running forward pass with adaptive routing...")
+    out = model(x)
+    
+    assert out.shape == (2, 3, 32, 32)
+    last_idx = model._last_expert_idx
+    assert last_idx.shape == (2, 4)
+    assert ((last_idx >= -1) & (last_idx < 10)).all(), f"Indices out of range: {last_idx}"
+    print("Adaptive routing test passed successfully!")
+
 if __name__ == '__main__':
     test_mamba_fixer_forward()
+    test_mamba_fixer_adaptive_routing()

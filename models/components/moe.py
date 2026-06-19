@@ -16,7 +16,7 @@ class MoERouter(nn.Module):
         self.n_experts = n_experts
 
     def forward(self, z_t: torch.Tensor, ictcp: torch.Tensor | None = None,
-                k: int = 4) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                k: int = 4, threshold: float = 1.0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x_feat = z_t.squeeze(1)
         if ictcp is not None:
             mean = ictcp.mean(dim=(2, 3))  # [B, 3]
@@ -28,7 +28,28 @@ class MoERouter(nn.Module):
 
         x = torch.cat([x_feat, stats], dim=1)  # [B, n_features + 6]
         logits = self.router(x)
-        weights, idx = torch.topk(F.softmax(logits, dim=-1), k, dim=-1)  # [B, k], [B, k]
+        
+        probs = F.softmax(logits, dim=-1)
+        
+        if threshold < 1.0:
+            # Sort probabilities to dynamically select active experts based on cumulative probability sum (Top-p)
+            sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
+            
+            top_probs = sorted_probs[:, :k]
+            top_idx = sorted_idx[:, :k]
+            
+            cum_probs = torch.cumsum(top_probs, dim=-1)
+            prev_cum_probs = torch.cat([torch.zeros_like(cum_probs[:, :1]), cum_probs[:, :-1]], dim=-1)
+            
+            active_mask = (prev_cum_probs < threshold)
+            # Ensure at least the top-1 expert is active
+            active_mask[:, 0] = True
+            
+            idx = torch.where(active_mask, top_idx, torch.tensor(-1, device=logits.device))
+            weights = torch.where(active_mask, top_probs, torch.tensor(0.0, device=logits.device, dtype=top_probs.dtype))
+        else:
+            weights, idx = torch.topk(probs, k, dim=-1)
+
         weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
         return idx, weights, logits
 
@@ -36,6 +57,4 @@ class MoERouter(nn.Module):
         probs = F.softmax(logits, dim=-1)
         weights = probs.mean(dim=0)
         target = torch.ones(self.n_experts, device=logits.device) / self.n_experts
-        kl = F.kl_div((weights + 1e-8).log(), target, reduction='sum')
-        entropy = -(probs * (probs + 1e-8).log()).sum(dim=-1).mean()
-        return kl - 0.1 * entropy
+        return F.kl_div((weights + 1e-8).log(), target, reduction='sum')

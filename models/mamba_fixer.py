@@ -16,8 +16,10 @@ class MambaFixer(nn.Module):
     def __init__(self, num_features: int = 64, state_dimension: int = 32,
                  num_features_stream: int = 2, num_experts: int = 100,
                  n_active: int = 4,
-                 dilation_rates: list[int] | None = None):
+                 dilation_rates: list[int] | None = None,
+                 routing_threshold: float = 1.0):
         super().__init__()
+        self.routing_threshold = routing_threshold
         self.num_features = num_features
         self.n_experts = num_experts
 
@@ -87,6 +89,8 @@ class MambaFixer(nn.Module):
         delta_acc = torch.zeros_like(ictcp)
         uniq = torch.unique(idx)
         for e in uniq:
+            if e == -1:
+                continue
             batch_inds, k_inds = torch.where(idx == e)
             w = weights[batch_inds, k_inds].view(-1, 1, 1, 1)
             inp = ictcp[batch_inds]
@@ -106,7 +110,7 @@ class MambaFixer(nn.Module):
         z_spatial = self.spatial_stats(x[:, 0:1])
         router_in = torch.cat([z_t, z_spatial], dim=-1)
 
-        idx, weights, logits = self.router(router_in, x, k=self.n_active)
+        idx, weights, logits = self.router(router_in, x, k=self.n_active, threshold=self.routing_threshold)
 
         self._last_expert_idx = idx.detach().cpu()
         self._balancing_loss = self.router.load_balancing_loss(logits)
