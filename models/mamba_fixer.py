@@ -5,12 +5,11 @@ from models.components import (
     DilatedHDCStream,
     MoERouter,
     DownsampleChain,
-    PatchEmbed,
     SequenceProcessor,
+    SpatialStats,
     yuv_to_ictcp,
     ictcp_to_yuv,
 )
-from models.components.hilbert import hilbert_flat_indices
 
 
 class MambaFixer(nn.Module):
@@ -22,13 +21,15 @@ class MambaFixer(nn.Module):
         self.num_features = num_features
         self.n_experts = num_experts
 
-        self.downsample = DownsampleChain()
-        self.patch_embed = PatchEmbed(1, num_features, 4)
+        self.downsample = DownsampleChain(1, num_features)
 
-        self.hilbert_ssm = SequenceProcessor(num_features, state_dimension)
+        self.ssm_fwd = SequenceProcessor(num_features, state_dimension)
+        self.ssm_bwd = SequenceProcessor(num_features, state_dimension)
+        self.ssm_proj = nn.Linear(num_features * 2, num_features)
         self.t_ssm = SequenceProcessor(num_features, state_dimension)
+        self.spatial_stats = SpatialStats()
 
-        self.router = MoERouter(num_features, num_experts)
+        self.router = MoERouter(num_features + 16, num_experts)
         self.n_active = n_active
 
         if dilation_rates is None:
@@ -65,37 +66,35 @@ class MambaFixer(nn.Module):
         dev = ictcp.device
         self._ensure_state(B, dev)
 
-        state = torch.zeros(B, self._t_state.shape[-1], device=dev)
-
         i_ch = ictcp[:, 0:1]
-        ds = self.downsample(i_ch)
-        feat = self.patch_embed(ds)
+        feat = self.downsample(i_ch)
 
-        B_embed, C_embed, H_embed, W_embed = feat.shape
-        flat = feat.view(B_embed, C_embed, -1).transpose(1, 2)
-        idx = hilbert_flat_indices(H_embed, W_embed).to(device=dev, non_blocking=True)
-        seq = flat[:, idx]
+        flat = feat.view(B, self.num_features, -1).transpose(1, 2)  # [B, 4096, num_features]
 
-        z, _ = self.hilbert_ssm(seq, state)
+        out_fwd, _ = self.ssm_fwd(flat, None)
+        z_fwd = out_fwd[:, -1, :]  # [B, 64]
 
-        z_t, self._t_state = self.t_ssm(z.unsqueeze(1), self._t_state)
-        return z_t
+        out_bwd, _ = self.ssm_bwd(flat.flip(dims=[1]), None)
+        z_bwd = out_bwd[:, -1, :]  # [B, 64]
+
+        z = self.ssm_proj(torch.cat([z_fwd, z_bwd], dim=-1))  # [B, 64]
+
+        out_t, self._t_state = self.t_ssm(z.unsqueeze(1), self._t_state)
+        return out_t[:, -1, :]
 
     def apply_experts(self, ictcp: torch.Tensor, idx: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        B, K = idx.shape
+        """Apply top-k expert deltas, grouped by unique expert (avoids 400-iter loop + GPU→CPU syncs)."""
         delta_acc = torch.zeros_like(ictcp)
-        for k in range(K):
-            for e in range(self.n_experts):
-                mask = (idx[:, k] == e)
-                if mask.any():
-                    batch_indices = mask.nonzero(as_tuple=True)[0]
-                    w = weights[batch_indices, k].view(-1, 1, 1, 1)
-                    inp = ictcp[batch_indices]
-                    delta_i = self.experts_i[e](inp[:, 0:1])
-                    delta_ct = self.experts_ct[e](inp[:, 1:2])
-                    delta_cp = self.experts_cp[e](inp[:, 2:3])
-                    delta = torch.cat([delta_i, delta_ct, delta_cp], dim=1)
-                    delta_acc[batch_indices] += w * delta
+        uniq = torch.unique(idx)
+        for e in uniq:
+            batch_inds, k_inds = torch.where(idx == e)
+            w = weights[batch_inds, k_inds].view(-1, 1, 1, 1)
+            inp = ictcp[batch_inds]
+            delta_i = self.experts_i[e](inp[:, 0:1])
+            delta_ct = self.experts_ct[e](inp[:, 1:2])
+            delta_cp = self.experts_cp[e](inp[:, 2:3])
+            delta = torch.cat([delta_i, delta_ct, delta_cp], dim=1)
+            delta_acc[batch_inds] += w * delta
         return ictcp + delta_acc
 
     def forward(self, x: torch.Tensor, ssm_only: bool = False) -> torch.Tensor | None:
@@ -104,7 +103,10 @@ class MambaFixer(nn.Module):
         if ssm_only:
             return None
 
-        idx, weights, logits = self.router(z_t, x, k=self.n_active)
+        z_spatial = self.spatial_stats(x[:, 0:1])
+        router_in = torch.cat([z_t, z_spatial], dim=-1)
+
+        idx, weights, logits = self.router(router_in, x, k=self.n_active)
 
         self._last_expert_idx = idx.detach().cpu()
         self._balancing_loss = self.router.load_balancing_loss(logits)
