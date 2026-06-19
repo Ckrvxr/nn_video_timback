@@ -72,12 +72,12 @@ class MambaFixer(nn.Module):
         flat = feat.view(B, self.num_features, -1).transpose(1, 2)  # [B, 4096, num_features]
 
         out_fwd, _ = self.ssm_fwd(flat, None)
-        z_fwd = out_fwd[:, -1, :]  # [B, 64]
+        z_fwd = out_fwd.mean(dim=1)
 
         out_bwd, _ = self.ssm_bwd(flat.flip(dims=[1]), None)
-        z_bwd = out_bwd[:, -1, :]  # [B, 64]
+        z_bwd = out_bwd.mean(dim=1)
 
-        z = self.ssm_proj(torch.cat([z_fwd, z_bwd], dim=-1))  # [B, 64]
+        z = self.ssm_proj(torch.cat([z_fwd, z_bwd], dim=-1))
 
         out_t, self._t_state = self.t_ssm(z.unsqueeze(1), self._t_state)
         return out_t[:, -1, :]

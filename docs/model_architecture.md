@@ -64,7 +64,7 @@ graph TD
   - 随后展平为序列 $[B, 4096, nf]$ 送入 SSM。
 - **双向空间序列处理器**：
   - 由 `ssm_fwd` 与 `ssm_bwd` 对该序列分别进行正向与反向扫描，使用自定义的 [FastSSM](file:///C:/Users/Ckrvxr/MyProject/nn_video_timback/models/components/fast_ssm.py) 处理。
-  - 拼接正反向的最后一个 Token 特征并通过线性映射 `ssm_proj` 投影回 $nf$ 维。
+  - 对正向与反向的特征序列进行全局平均池化（Mean Pooling），拼接池化后的特征并通过线性映射 `ssm_proj` 投影回 $nf$ 维。
 - **时间序列处理器 (`t_ssm`)**：
   - 将当前帧压缩的空间特征送入另一个 `SequenceProcessor`，在视频的时间步维度上递归地更新并保留隐状态 `_t_state`，输出代表时序上下文的特征向量 $z_t$。
 
