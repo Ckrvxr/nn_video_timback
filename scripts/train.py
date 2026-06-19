@@ -702,7 +702,20 @@ def main():
 
     # ── Baseline (untrained model, cached across runs) ────────────
     if val_loader is not None:
-        baseline_path = output_dir / 'baseline.json'
+        import hashlib
+        # Generate a unique hash based on current validation dataset and model config to prevent stale cache bugs
+        config_hash_payload = json.dumps({
+            'dataset_paths': dataset_cfg.get('dataset_paths'),
+            'val_dataset_path': dataset_cfg.get('val_dataset_path'),
+            'patch_size': dataset_cfg.get('patch_size'),
+            'num_frames': dataset_cfg.get('num_frames'),
+            'model_name': model_cfg.get('model_name'),
+            'num_features': model_cfg.get('num_features'),
+            'routing_threshold': model_cfg.get('routing_threshold'),
+        }, sort_keys=True)
+        cfg_hash = hashlib.md5(config_hash_payload.encode()).hexdigest()[:8]
+        baseline_path = output_dir / f'baseline_{cfg_hash}.json'
+
         if baseline_path.exists():
             baseline = json.load(open(baseline_path))
             console.info(f"Baseline loaded from cache: psnr={baseline['psnr']:.2f} "
