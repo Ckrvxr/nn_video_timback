@@ -49,13 +49,13 @@ class MambaFixer(nn.Module):
     def reset_state(self, batch_size: int = 1, device: torch.device | None = None):
         d = self._t_state.shape[-1]
         dev = device or self._t_state.device
-        self._t_state = torch.zeros(batch_size, d, device=dev)
+        self._t_state = torch.zeros(batch_size, d, device=dev, dtype=self._t_state.dtype)
         self._has_state = True
 
     def _ensure_state(self, B: int, dev: torch.device):
         if not self._has_state:
             d = self._t_state.shape[-1]
-            self._t_state = torch.zeros(B, d, device=dev)
+            self._t_state = torch.zeros(B, d, device=dev, dtype=self._t_state.dtype)
             self._has_state = True
         elif self._t_state.shape[0] != B:
             self._t_state = self._t_state[:1].expand(B, -1).contiguous()
