@@ -1,4 +1,4 @@
-from .dilated_stream import DilatedHDCStream, MergedDilatedHDCStream
+from .dilated_stream import DilatedHDCStream, MergedDilatedHDCStream, ParallelExperts
 from .downsample import DownsampleChain
 from .mamba_block import SequenceProcessor
 from .moe import MoERouter

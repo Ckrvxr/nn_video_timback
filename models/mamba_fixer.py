@@ -3,6 +3,7 @@ import torch.nn as nn
 
 from models.components import (
     DilatedHDCStream,
+    ParallelExperts,
     MoERouter,
     DownsampleChain,
     SequenceProcessor,
@@ -36,12 +37,9 @@ class MambaFixer(nn.Module):
 
         if dilation_rates is None:
             dilation_rates = [1, 2, 4, 32]
-        self.experts_i = nn.ModuleList(
-            [DilatedHDCStream(num_features_stream, dilation_rates) for _ in range(num_experts)])
-        self.experts_ct = nn.ModuleList(
-            [DilatedHDCStream(num_features_stream, dilation_rates) for _ in range(num_experts)])
-        self.experts_cp = nn.ModuleList(
-            [DilatedHDCStream(num_features_stream, dilation_rates) for _ in range(num_experts)])
+        self.experts_i = ParallelExperts(num_experts, num_features_stream, dilation_rates)
+        self.experts_ct = ParallelExperts(num_experts, num_features_stream, dilation_rates)
+        self.experts_cp = ParallelExperts(num_experts, num_features_stream, dilation_rates)
 
         self.register_buffer('_t_state', torch.zeros(state_dimension))
         self._has_state = False
@@ -85,21 +83,12 @@ class MambaFixer(nn.Module):
         return out_t[:, -1, :]
 
     def apply_experts(self, ictcp: torch.Tensor, idx: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        """Apply top-k expert deltas, grouped by unique expert (avoids 400-iter loop + GPU→CPU syncs)."""
-        delta_acc = torch.zeros_like(ictcp)
-        uniq = torch.unique(idx)
-        for e in uniq:
-            if e == -1:
-                continue
-            batch_inds, k_inds = torch.where(idx == e)
-            w = weights[batch_inds, k_inds].view(-1, 1, 1, 1)
-            inp = ictcp[batch_inds]
-            delta_i = self.experts_i[e](inp[:, 0:1])
-            delta_ct = self.experts_ct[e](inp[:, 1:2])
-            delta_cp = self.experts_cp[e](inp[:, 2:3])
-            delta = torch.cat([delta_i, delta_ct, delta_cp], dim=1)
-            delta_acc[batch_inds] += w * delta
-        return ictcp + delta_acc
+        """Apply top-k expert deltas using dynamic grouped parallel convolutions."""
+        delta_i = self.experts_i(ictcp[:, 0:1], idx, weights)
+        delta_ct = self.experts_ct(ictcp[:, 1:2], idx, weights)
+        delta_cp = self.experts_cp(ictcp[:, 2:3], idx, weights)
+        delta = torch.cat([delta_i, delta_ct, delta_cp], dim=1)
+        return ictcp + delta
 
     def forward(self, x: torch.Tensor, ssm_only: bool = False) -> torch.Tensor | None:
         z_t = self.forward_ssm_ictcp(x)
