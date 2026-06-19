@@ -96,14 +96,17 @@ def load_video_frames(video_path: str) -> list[np.ndarray]:
 def load_video_frame_range(video_path: str, start: int, end: int) -> list[np.ndarray]:
     """Decode frames [start, end) from video, return list of YUV uint8/uint16 (H×W×3).
 
-    Uses PyAV seek + PTS-based index, with sequential fallback for
-    frames missing PTS (extremely rare for AV1).
+    Uses PyAV seek + PTS-based index for random access.  Falls back to
+    sequential counting when PTS-based decoding returns too few frames
+    (e.g. PTS discontinuity at the end of an h264 stream).
     """
+    n_wanted = end - start
     frames = []
+    pts_ok = True
+
     with av.open(video_path) as container:
         stream = container.streams.video[0]
         stream.thread_type = 'AUTO'
-        n_wanted = end - start
 
         if start > 0:
             fps = float(stream.average_rate or 30)
@@ -115,7 +118,7 @@ def load_video_frame_range(video_path: str, start: int, end: int) -> list[np.nda
             if kept >= n_wanted:
                 break
 
-            if frame.pts is not None:
+            if start > 0 and frame.pts is not None:
                 fps = float(stream.average_rate or 30)
                 frame_idx = int(round(frame.pts * frame.time_base * fps))
                 if frame_idx < start:
@@ -132,6 +135,30 @@ def load_video_frame_range(video_path: str, start: int, end: int) -> list[np.nda
                 v = cv2.resize(v, (y.shape[1], y.shape[0]), interpolation=cv2.INTER_LINEAR)
             frames.append(np.stack([y, u, v], axis=-1))
             kept += 1
+
+        pts_ok = len(frames) >= n_wanted
+
+    # PTS 路径未拿到足够帧 → 从头顺序解码回退
+    if not pts_ok:
+        frames = []
+        with av.open(video_path) as container:
+            stream = container.streams.video[0]
+            stream.thread_type = 'AUTO'
+            frame_idx = 0
+            for frame in container.decode(video=0):
+                if frame_idx >= end:
+                    break
+                if frame_idx >= start:
+                    bits = _plane_bits(frame, 0)
+                    y = _read_plane(frame.planes[0], bits)
+                    u = _read_plane(frame.planes[1], bits)
+                    v = _read_plane(frame.planes[2], bits)
+                    if u.shape != y.shape:
+                        u = cv2.resize(u, (y.shape[1], y.shape[0]), interpolation=cv2.INTER_LINEAR)
+                        v = cv2.resize(v, (y.shape[1], y.shape[0]), interpolation=cv2.INTER_LINEAR)
+                    frames.append(np.stack([y, u, v], axis=-1))
+                frame_idx += 1
+
     return frames
 
 
@@ -162,6 +189,51 @@ def _probe_frame_count_ffprobe(video_path: str) -> int | None:
     """Fast frame count using ffprobe if available."""
     if shutil.which('ffprobe') is None:
         return None
+
+    # 1. nb_frames — fastest, only works for containers with frame count metadata
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=nb_frames',
+                '-of', 'csv=p=0',
+                video_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        out = result.stdout.strip().rstrip(',')
+        if out and out.isdigit():
+            return int(out)
+    except Exception:
+        pass
+
+    # 2. count_frames — decodes all frames, accurate for mkv/hevc
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-select_streams', 'v:0',
+                '-count_frames',
+                '-show_entries', 'stream=nb_read_frames',
+                '-of', 'csv=p=0',
+                video_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        out = result.stdout.strip().rstrip(',')
+        if out and out.isdigit():
+            return int(out)
+    except Exception:
+        pass
+
+    # 3. count_packets — fast but can overcount for HEVC (last resort)
     try:
         result = subprocess.run(
             [
@@ -177,31 +249,12 @@ def _probe_frame_count_ffprobe(video_path: str) -> int | None:
             timeout=30,
             check=False,
         )
-        out = result.stdout.strip()
+        out = result.stdout.strip().rstrip(',')
         if out and out.isdigit():
             return int(out)
     except Exception:
         pass
 
-    try:
-        result = subprocess.run(
-            [
-                'ffprobe', '-v', 'error',
-                '-select_streams', 'v:0',
-                '-show_entries', 'stream=nb_frames',
-                '-of', 'csv=p=0',
-                video_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        out = result.stdout.strip()
-        if out and out.isdigit():
-            return int(out)
-    except Exception:
-        pass
     return None
 
 
@@ -214,3 +267,10 @@ def probe_frame_count(video_path: str) -> int:
         stream = container.streams.video[0]
         n = stream.frames
     return n
+
+
+def probe_resolution(video_path: str) -> tuple[int, int]:
+    """Return (height, width) from the first video stream."""
+    with av.open(video_path) as container:
+        stream = container.streams.video[0]
+        return stream.height, stream.width

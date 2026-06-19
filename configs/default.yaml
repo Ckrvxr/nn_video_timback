@@ -10,8 +10,6 @@ dataset:
   validation_batch_size: 2
   num_workers: 2
   validation_num_workers: 2
-  warm_cache_on_startup: true
-  max_videos_in_cache: 1
   shuffle_variants: true
   clip_repeat_factor: 1
 

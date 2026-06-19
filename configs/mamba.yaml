@@ -4,9 +4,9 @@ random_seed: 42
 dataset:
   data_type: preprocessed
   dataset_paths: [
-             ./data/violet
+             ./data/catchme
     ]
-  val_dataset_path: ./data/violet_val
+  val_dataset_path: ./data/catchme_val
   patch_size: 512
   num_frames: 9
   sequential_mode: true

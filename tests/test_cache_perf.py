@@ -35,7 +35,7 @@ def test_lazy_live_decode():
         video_path = tmp_path / "test_video.mp4"
         create_dummy_video(video_path, width=320, height=240, num_frames=10)
 
-        lr = LazyFrameRange(None, str(video_path), 10, window_size=5)
+        lr = LazyFrameRange(str(video_path), 10, window_size=5)
 
         # Sequential access
         frames = [lr[i] for i in range(10)]

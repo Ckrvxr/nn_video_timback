@@ -3,56 +3,32 @@
 pixi.lock
 
 # Python
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-*.egg
 
-# Training artifacts
+
+# Runs
 runs/
-checkpoints/
-*.pth
-*.pt
-*.onnx
+*.log
 
 # Data
-data/datasets/
-data/raw_videos/
-*.mp4
-*.mkv
-*.avi
-*.mov
-
-# Logs / metrics
-*.log
-wandb/
-lightning_logs/
-output/
+data/
 
 # Editors
 .vscode/
 .idea/
-*.swp
-*.swo
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Lint / type check
+# Temp / Cache
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
-
-# Coverage
-htmlcov/
-.coverage
-.coverage.*
-
-# Misc temp
 tmp/
 temp/
 .playwright-mcp/
-trace.json
-trace_seq.json
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg

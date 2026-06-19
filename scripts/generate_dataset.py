@@ -1,18 +1,19 @@
 import argparse
 import glob
+import json
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import tqdm
-
+import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 SUPPORTED_EXTS = {'.mp4', '.mkv', '.mov', '.webm', '.avi'}
-PIX_FMT = 'yuv444p10le'
 COLOR_TAGS = [
     '-color_primaries', 'bt2020',
     '-color_trc', 'smpte2084',
@@ -20,16 +21,20 @@ COLOR_TAGS = [
     '-color_range', 'pc',
 ]
 
+LR_PIX_WEIGHTS = {
+    12: [('yuv420p12le', 5), ('yuv420p10le', 4), ('yuv420p', 1)],
+    10: [('yuv420p10le', 7), ('yuv420p', 3)],
+     8: [('yuv420p', 1)],
+}
+
 AV1_PRESETS = [8, 9, 10, 11, 12]
-X265_PRESETS = ['medium', 'slow', 'veryslow', 'fast']
+X265_PRESETS = ['medium', 'slow', 'fast']
 X264_PRESETS = ['medium', 'slow', 'veryslow', 'fast']
-VP9_CPU_USED = [0, 1, 2, 3, 4]
 
 ENCODER_WEIGHTS = {
     'av1': 3,
     'h265': 3,
     'h264': 3,
-    'vp9': 1,
 }
 
 
@@ -99,6 +104,22 @@ def probe_video(video_path: Path) -> tuple[float, int]:
         except Exception:
             pass
     return fps, total_frames
+
+
+def _probe_bit_depth(video_path: Path) -> int:
+    out = _run_ffprobe(video_path,
+                       ['-show_entries', 'stream=bits_per_raw_sample,pix_fmt'])
+    if not out:
+        return 10
+    parts = out.split(',')
+    pix = parts[0]
+    bits = parts[1] if len(parts) > 1 else ''
+    if bits and bits.isdigit():
+        return int(bits)
+    for b in ['16', '12', '10', '9']:
+        if b in pix:
+            return int(b)
+    return 8
 
 
 def get_video_resolution(video_path: Path) -> tuple[int, int]:
@@ -184,31 +205,32 @@ def _ffmpeg(cmd: list[str], desc: str, timeout: int = 7200):
             f'{desc} failed: ' + result.stderr.decode(errors='replace')[-500:])
 
 
-def process_video(video_path: Path, args) -> int:
+def _plan_segments(video_path: Path, args) -> list[dict] | None:
     name = sanitize(video_path.stem)
     rng = random.Random(hash(f'{name}_{args.seed}'))
 
     fps, total_frames = probe_video(video_path)
     w, h = get_video_resolution(video_path)
     if total_frames == 0:
-        return 0
+        return None
 
-    lr_scale = make_scale_filter(w, h, args.scale)
-    output_dir = Path(args.output_dir)
+    source_bits = _probe_bit_depth(video_path)
+    hr_pix = 'yuv444p' + (f'{source_bits}le' if source_bits > 8 else '')
 
     trim = max(1, total_frames // 100)
     valid_start = trim
     valid_end = total_frames - trim
     valid_range = valid_end - valid_start
-
     if valid_range <= 0:
-        return 0
+        return None
 
     num_slices = args.num_slices if args.num_slices is not None else 3
-    total_needed = num_slices * args.slice_frames
+    lr_padding = 90
+    seg_frames = args.num_frames + 2 * lr_padding
+    total_needed = num_slices * seg_frames
     if total_needed > valid_range:
         raise ValueError(
-            f'{video_path.name}: {num_slices}×{args.slice_frames}={total_needed} frames needed, '
+            f'{video_path.name}: {num_slices}×{seg_frames}={total_needed} frames needed, '
             f'but only {valid_range} frames available after trimming '
             f'[{trim}]×2 from {total_frames}')
 
@@ -224,142 +246,180 @@ def process_video(video_path: Path, args) -> int:
     pos = valid_start + gaps[0]
     for i in range(num_slices):
         starts.append(pos)
-        pos += args.slice_frames + gaps[i + 1]
+        pos += seg_frames + gaps[i + 1]
 
-    # Determine color conversion (once per video)
-    if args.colorspace == 'passthrough':
-        conv_filter = None
-        conv_desc = 'passthrough mode, no conversion'
-    else:
-        conv_filter, conv_desc = color_conversion_filter(video_path)
-    print(f'  {video_path.name}: {conv_desc}')
+    print(f'  {video_path.name}: source_bits={source_bits}, HR={hr_pix}')
 
-    hr_dir = output_dir / 'HR'
-    segments_created = 0
+    patch_size = getattr(args, 'patch_size', 512)
+    scale = args.scale
+    src_gx = w // patch_size
+    src_gy = h // patch_size
+    lr_gx = (w // scale) // patch_size
+    lr_gy = (h // scale) // patch_size
+    max_gx = min(src_gx, lr_gx)
+    max_gy = min(src_gy, lr_gy)
+    if max_gy < 1 or max_gx < 1:
+        return None
 
+    lr_pix_opts = LR_PIX_WEIGHTS.get(source_bits, LR_PIX_WEIGHTS[10])
+    lr_scale = make_scale_filter(w, h, args.scale)
+
+    segments = []
     for seg_idx, start_frame in enumerate(starts):
-        seg_name = f'{name}_seg{seg_idx}'
-        hr_path = hr_dir / f'{seg_name}.mkv'
+        seg_rng = random.Random(hash(f'{name}_{seg_idx}_{args.seed}'))
+        gyi = seg_rng.randint(0, max(1, max_gy) - 1)
+        gxi = seg_rng.randint(0, max(1, max_gx) - 1)
+        segments.append({
+            'video_path': video_path,
+            'seg_idx': seg_idx,
+            'start_frame': start_frame,
+            'gxi': gxi,
+            'gyi': gyi,
+            'fps': fps,
+            'source_bits': source_bits,
+            'lr_pix_opts': lr_pix_opts,
+            'lr_scale': lr_scale,
+        })
 
-        if hr_path.exists() and not args.no_resume:
-            segments_created += 1
-            continue
+    return segments
 
-        # Build filter chain: select + optional color conversion
-        seek_time = start_frame / fps
-        select = f'select=between(n\\,{start_frame}\\,{start_frame + args.slice_frames - 1})'
-        vf_parts = [select]
-        if conv_filter:
-            vf_parts.append(conv_filter)
-        vf_filter = ','.join(vf_parts)
 
-        # ── HR: lossless FFV1, BT.2020 PQ yuv444p10le ────────────────
-        hr_dir.mkdir(parents=True, exist_ok=True)
-        hr_cmd = [
-            'ffmpeg', '-y',
-            '-ss', f'{seek_time:.6f}',
-            '-i', str(video_path),
-            '-vf', vf_filter,
-            '-vsync', '0',
-            '-c:v', 'ffv1',
-            '-pix_fmt', PIX_FMT,
-            *COLOR_TAGS,
-            '-an',
-            '-frames:v', str(args.slice_frames),
-            str(hr_path),
-        ]
-        _ffmpeg(hr_cmd, f'HR {seg_name}', timeout=600)
+def process_segment(video_path: Path, seg_idx: int, start_frame: int,
+                    gxi: int, gyi: int, fps: float, source_bits: int,
+                    lr_pix_opts: list[tuple[str, int]], lr_scale: str | None,
+                    args) -> bool:
+    name = sanitize(video_path.stem)
+    rng = random.Random(hash(f'{name}_{seg_idx}_{args.seed}'))
+    seg_name = f'{name}_seg{seg_idx}'
 
-        # ── LR: re-encode HR with random codec + params ────────────
-        encoder_pairs = [(e, ENCODER_WEIGHTS[e]) for e in args.encoders if e in ENCODER_WEIGHTS]
-        if not encoder_pairs:
-            encoder_pairs = [('av1', 1)]
-        enc_pool = [e for e, _ in encoder_pairs]
-        enc_w = [w for _, w in encoder_pairs]
+    num_frames = getattr(args, 'num_frames', 30)
+    patch_size = getattr(args, 'patch_size', 512)
+    lr_padding = 90
+    lr_frames = num_frames + 2 * lr_padding
+    output_dir = Path(args.output_dir)
+    tmp_dir = output_dir / '.tmp'
 
-        for v in range(args.num_variants):
-            codec = rng.choices(enc_pool, weights=enc_w, k=1)[0]
+    lr_pool = [p for p, _ in lr_pix_opts]
+    lr_pw = [w for _, w in lr_pix_opts]
 
-            if codec == 'av1':
-                crf = rng.randint(30, 63)
-                preset = rng.choice(AV1_PRESETS)
-                keyint = rng.choice([32, 64, 96, 128, 160, 300])
-                film_grain = _random_film_grain(rng)
-                dir_name = f'av1_crf{crf}_p{preset}_gop{keyint}_fg{film_grain}'
-                lr_cmd = [
+    cx = gxi * patch_size
+    cy = gyi * patch_size
+    center = start_frame + lr_padding
+
+    scale = args.scale
+    if scale > 1:
+        hr_vf = f'crop={patch_size * scale}:{patch_size * scale}:{cx}:{cy},scale={patch_size}:{patch_size}'
+        lr_vf = f'crop={patch_size}:{patch_size}:{cx // scale}:{cy // scale}'
+    else:
+        hr_vf = f'crop={patch_size}:{patch_size}:{cx}:{cy}'
+        lr_vf = f'crop={patch_size}:{patch_size}:{cx}:{cy}'
+
+    encoder_pairs = [(e, ENCODER_WEIGHTS[e]) for e in args.encoders if e in ENCODER_WEIGHTS]
+    if not encoder_pairs:
+        encoder_pairs = [('av1', 1)]
+    enc_pool = [e for e, _ in encoder_pairs]
+    enc_w = [w for _, w in encoder_pairs]
+
+    for v in range(args.num_variants):
+        for _attempt in range(3):
+            try:
+                codec = rng.choices(enc_pool, weights=enc_w, k=1)[0]
+                lr_pix = rng.choices(lr_pool, weights=lr_pw, k=1)[0]
+                seek_time = start_frame / fps
+
+                if codec == 'av1':
+                    crf = int(round(max(18, min(61, rng.gauss(30, 6)))))
+                    preset = rng.choice(AV1_PRESETS)
+                    keyint = rng.choice([32, 64, 96, 128, 160, 300])
+                    film_grain = _random_film_grain(rng)
+                    dir_name = f'av1_crf{crf}_p{preset}_gop{keyint}_fg{film_grain}_{lr_pix}'
+                    lr_cmd = [
+                        'ffmpeg', '-y',
+                        '-ss', f'{seek_time:.6f}',
+                        '-i', str(video_path),
+                        '-c:v', 'libsvtav1',
+                        '-crf', str(crf), '-g', str(keyint),
+                        '-pix_fmt', lr_pix,
+                        '-svtav1-params',
+                        f'tune=0:preset={preset}:film_grain={film_grain}',
+                        '-frames:v', str(lr_frames),
+                        *COLOR_TAGS, '-an',
+                    ]
+                elif codec == 'h265':
+                    crf = int(round(max(18, min(61, rng.gauss(29, 6)))))
+                    preset = rng.choice(X265_PRESETS)
+                    keyint = rng.choice([32, 64, 96, 128, 160, 300])
+                    dir_name = f'h265_crf{crf}_p{preset}_gop{keyint}_{lr_pix}'
+                    lr_cmd = [
+                        'ffmpeg', '-y',
+                        '-ss', f'{seek_time:.6f}',
+                        '-i', str(video_path),
+                        '-c:v', 'libx265',
+                        '-preset', preset, '-crf', str(crf),
+                        '-pix_fmt', lr_pix,
+                        '-x265-params', f'keyint={keyint}:no-open-gop=1',
+                        '-frames:v', str(lr_frames),
+                        *COLOR_TAGS, '-an',
+                    ]
+                elif codec == 'h264':
+                    crf = int(round(max(18, min(61, rng.gauss(28, 6)))))
+                    preset = rng.choice(X264_PRESETS)
+                    keyint = rng.choice([32, 64, 96, 128, 160, 300])
+                    dir_name = f'h264_crf{crf}_p{preset}_gop{keyint}_{lr_pix}'
+                    lr_cmd = [
+                        'ffmpeg', '-y',
+                        '-ss', f'{seek_time:.6f}',
+                        '-i', str(video_path),
+                        '-c:v', 'libx264',
+                        '-preset', preset, '-crf', str(crf),
+                        '-g', str(keyint),
+                        '-pix_fmt', lr_pix,
+                        '-frames:v', str(lr_frames),
+                        *COLOR_TAGS, '-an',
+                    ]
+
+                if lr_scale:
+                    lr_cmd += ['-vf', lr_scale]
+                lr_raw = tmp_dir / f'{seg_name}_{v}.mp4'
+                if not lr_raw.exists() or args.no_resume:
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    _ffmpeg(lr_cmd + [str(lr_raw)], f'{codec} {seg_name} v{v}')
+
+                h_start = center / fps
+                h_end = (center + num_frames) / fps
+                name_dir = f'{int(h_start//60):02d}m{int(h_start%60):02d}s_{int(h_end//60):02d}m{int(h_end%60):02d}s_{dir_name}'
+                final_dir = output_dir / name_dir
+                if (final_dir / 'meta.json').exists() and not args.no_resume:
+                    break
+                final_dir.mkdir(parents=True, exist_ok=True)
+
+                _ffmpeg([
                     'ffmpeg', '-y',
-                    '-i', str(hr_path),
-                    '-c:v', 'libsvtav1',
-                    '-crf', str(crf),
-                    '-g', str(keyint),
-                    '-pix_fmt', PIX_FMT,
-                    '-svtav1-params',
-                    f'tune=0:preset={preset}:film_grain={film_grain}',
+                    '-ss', f'{h_start:.6f}',
+                    '-i', str(video_path),
+                    '-vf', hr_vf,
+                    '-c:v', 'ffv1',
+                    '-frames:v', str(num_frames),
                     *COLOR_TAGS, '-an',
-                ]
+                    str(final_dir / 'HR.mkv'),
+                ], f'FFV1 HR {seg_name}')
 
-            elif codec == 'h265':
-                crf = rng.randint(18, 40)
-                preset = rng.choice(X265_PRESETS)
-                keyint = rng.choice([32, 64, 96, 128, 160, 300])
-                dir_name = f'h265_crf{crf}_p{preset}_gop{keyint}'
-                lr_cmd = [
+                _ffmpeg([
                     'ffmpeg', '-y',
-                    '-i', str(hr_path),
-                    '-c:v', 'libx265',
-                    '-preset', preset,
-                    '-crf', str(crf),
-                    '-pix_fmt', PIX_FMT,
-                    '-x265-params', f'keyint={keyint}:no-open-gop=1',
+                    '-ss', f'{lr_padding / fps:.6f}',
+                    '-i', str(lr_raw),
+                    '-vf', lr_vf,
+                    '-c:v', 'ffv1',
+                    '-frames:v', str(num_frames),
                     *COLOR_TAGS, '-an',
-                ]
+                    str(final_dir / 'LR.mkv'),
+                ], f'FFV1 LR {seg_name} v{v}')
+                break  # all ffmpeg calls succeeded
+            except RuntimeError:
+                if _attempt == 2:
+                    raise  # give up after 3 attempts
 
-            elif codec == 'h264':
-                crf = rng.randint(18, 40)
-                preset = rng.choice(X264_PRESETS)
-                keyint = rng.choice([32, 64, 96, 128, 160, 300])
-                dir_name = f'h264_crf{crf}_p{preset}_gop{keyint}'
-                lr_cmd = [
-                    'ffmpeg', '-y',
-                    '-i', str(hr_path),
-                    '-c:v', 'libx264',
-                    '-preset', preset,
-                    '-crf', str(crf),
-                    '-g', str(keyint),
-                    '-pix_fmt', PIX_FMT,
-                    *COLOR_TAGS, '-an',
-                ]
-
-            elif codec == 'vp9':
-                crf = rng.randint(15, 40)
-                preset = rng.choice(VP9_CPU_USED)
-                keyint = rng.choice([32, 64, 96, 128, 160, 300])
-                dir_name = f'vp9_crf{crf}_cpu{preset}_gop{keyint}'
-                lr_cmd = [
-                    'ffmpeg', '-y',
-                    '-i', str(hr_path),
-                    '-c:v', 'libvpx-vp9',
-                    '-crf', str(crf),
-                    '-g', str(keyint),
-                    '-pix_fmt', PIX_FMT,
-                    '-deadline', 'good',
-                    '-cpu-used', str(preset),
-                    *COLOR_TAGS, '-an',
-                ]
-
-            variant_dir = output_dir / dir_name
-            variant_dir.mkdir(parents=True, exist_ok=True)
-            lr_path = variant_dir / f'{seg_name}.mp4'
-            if lr_path.exists() and not args.no_resume:
-                continue
-            if lr_scale:
-                lr_cmd += ['-vf', lr_scale]
-            lr_cmd += [str(lr_path)]
-            _ffmpeg(lr_cmd, f'{codec} {seg_name} v{v}')
-
-        segments_created += 1
-
-    return segments_created
+    return True
 
 
 def count_segments(video_path: Path, args) -> int:
@@ -371,10 +431,102 @@ def count_segments(video_path: Path, args) -> int:
     if valid_range <= 0:
         return 0
     num_slices = args.num_slices if args.num_slices is not None else 3
-    total_needed = num_slices * args.slice_frames
+    seg_frames = args.num_frames + 2 * 90
+    total_needed = num_slices * seg_frames
     if total_needed > valid_range:
         return 0
     return num_slices
+
+
+def _batch_yuv_to_ictcp_crop_gpu(yuv_frames: list, crop_info: tuple,
+                                 batch_size: int = 8, patch_size: int = 512) -> np.ndarray:
+    """Decode YUV in batches, GPU convert to ICtCp, crop 512², accumulate.
+
+    crop_info = (crop_y, crop_x, num_frames)
+    Returns (num_frames, 3, 512, 512) float16.
+    """
+    import torch
+    crop_y, crop_x, total_n = crop_info
+    out = np.empty((total_n, 3, patch_size, patch_size), dtype=np.float16)
+
+    for start in range(0, total_n, batch_size):
+        end = min(start + batch_size, total_n)
+        chunk = yuv_frames[start:end]
+        batch = np.stack(chunk, axis=0)
+
+        bits = 8
+        if batch.dtype == np.uint16:
+            max_val = int(batch.max())
+            bits = 12 if max_val > 1023 else 10
+        peak = float((1 << bits) - 1)
+        center = float(1 << (bits - 1))
+
+        t = torch.from_numpy(batch.astype(np.float32, copy=False)).cuda()
+        t = t.permute(0, 3, 1, 2).contiguous()
+        t[:, 0:1] = t[:, 0:1] / peak * 255.0
+        t[:, 1:] = (t[:, 1:] - center) / peak * 255.0 + 128.0
+        t = t / 127.5 - 1.0
+
+        from models.components.color_space import yuv_to_ictcp
+        with torch.no_grad():
+            ictcp = yuv_to_ictcp(t).cpu().numpy().astype(np.float16)
+
+        out[start:end] = ictcp[:, :, crop_y:crop_y + patch_size, crop_x:crop_x + patch_size]
+
+    return out
+
+
+def _preprocess_one_segment(seg_dir: Path, crop_info: tuple,
+                            num_frames: int = 30, patch_size: int = 512):
+    """Read HR.mkv/LR.mp4 from seg_dir → ICtCp → hr.npy/lr.npy/meta.json.
+
+    Files are pre-trimmed to the exact window, so always read from frame 0.
+    """
+    from utils.video_loader import load_video_frame_range
+
+    yuv = load_video_frame_range(str(seg_dir / 'HR.mkv'), 0, num_frames)
+    hr_p = _batch_yuv_to_ictcp_crop_gpu(yuv, crop_info[:2] + (num_frames,))
+    np.save(str(seg_dir / 'hr.npy'), hr_p)
+    del yuv, hr_p
+
+    lr_path = seg_dir / 'LR.mkv'
+    if lr_path.exists():
+        yuv = load_video_frame_range(str(lr_path), 0, num_frames)
+        lr_p = _batch_yuv_to_ictcp_crop_gpu(yuv, crop_info[:2] + (num_frames,))
+        np.save(str(seg_dir / 'lr.npy'), lr_p)
+        del yuv, lr_p
+
+    with open(str(seg_dir / 'meta.json'), 'w') as f:
+        json.dump({'window_start': crop_info[2], 'grid_y': crop_info[3],
+                   'grid_x': crop_info[4], 'gy': crop_info[5], 'gx': crop_info[6],
+                   'num_frames': num_frames}, f, indent=2)
+
+
+def preprocess_dataset(data_dir: str, num_frames: int = 30, patch_size: int = 512):
+    """Walk named dirs, ICtCp HR.mkv+LR.mp4 → hr.npy/lr.npy/meta.json in-place."""
+    from utils.video_loader import probe_resolution, probe_frame_count
+    data_path = Path(data_dir)
+    dirs = sorted(d for d in data_path.iterdir()
+                  if d.is_dir() and d.name != '.tmp')
+
+    import tqdm
+    for seg_dir in tqdm.tqdm(dirs, desc='Preprocessing', unit='seg'):
+        if (seg_dir / 'meta.json').exists():
+            continue
+        hr_path = seg_dir / 'HR.mkv'
+        if not hr_path.exists():
+            continue
+
+        h, w = probe_resolution(str(hr_path))
+        gy, gx = h // patch_size, w // patch_size
+
+        # Files are pre-cropped; meta.json for record only
+        rng = random.Random(hash(seg_dir.name))
+        gyi = rng.randint(0, max(1, gy) - 1)
+        gxi = rng.randint(0, max(1, gx) - 1)
+        crop_info = (0, 0, 0, gyi, gxi, gy, gx)
+
+        _preprocess_one_segment(seg_dir, crop_info, num_frames, patch_size)
 
 
 def main():
@@ -388,15 +540,19 @@ def main():
                         help='Dataset name (default: dataset)')
     parser.add_argument('--scale', type=int, default=1,
                         help='Downsampling factor (2 = half resolution)')
-    parser.add_argument('--slice-frames', type=int, default=90,
-                        help='Frames per segment (default: 90)')
+    parser.add_argument('--slice-frames', type=int, default=30,
+                        help='Frames per output window (default: 30)')
     parser.add_argument('--num-slices', type=int, default=None,
                         help='Number of segments per video (default: 3)')
+    parser.add_argument('--num-frames', type=int, default=30,
+                        help='Patch window size in frames (default: 30)')
+    parser.add_argument('--patch-size', type=int, default=512,
+                        help='Spatial patch size in pixels (default: 512)')
     parser.add_argument('--num-variants', type=int, default=1,
                         help='Number of LR variants per segment (default: 1)')
     parser.add_argument('--encoders', type=str, nargs='+',
-                        default=['av1', 'h265', 'h264', 'vp9'],
-                        choices=['av1', 'h265', 'h264', 'vp9'],
+                        default=['av1', 'h265', 'h264'],
+                        choices=['av1', 'h265', 'h264'],
                         help='Encoders to randomly pick from (default: all)')
     parser.add_argument('--workers', type=int, default=2,
                         help='Parallel videos (default: 2)')
@@ -436,23 +592,41 @@ def main():
     from concurrent.futures import ProcessPoolExecutor, as_completed
     t0 = time.perf_counter()
 
-    total_segments = sum(count_segments(v, args) for v in videos)
-    if total_segments == 0:
-        print('No segments to generate (all videos too short or 0 frames)')
+    all_segments = []
+    for v in videos:
+        try:
+            segs = _plan_segments(v, args)
+            if segs:
+                all_segments.extend(segs)
+        except ValueError as e:
+            print(f'  {v.name}: {e}')
+
+    if not all_segments:
+        print('No segments to generate')
         return
 
     with ProcessPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(process_video, v, args): v for v in videos}
-        with tqdm.tqdm(total=total_segments, desc='Generating', unit='seg') as pbar:
+        with tqdm.tqdm(total=len(all_segments), desc='Generating', unit='seg') as pbar:
+            futures = {}
+            for s in all_segments:
+                f = executor.submit(process_segment,
+                    s['video_path'], s['seg_idx'], s['start_frame'],
+                    s['gxi'], s['gyi'], s['fps'], s['source_bits'],
+                    s['lr_pix_opts'], s['lr_scale'], args)
+                futures[f] = s
+
             for future in as_completed(futures):
-                v = futures[future]
+                s = futures[future]
                 try:
-                    segs = future.result()
-                    if segs > 0:
-                        pbar.set_postfix_str(f'{v.stem}')
-                    pbar.update(segs)
+                    future.result()
+                    pbar.set_postfix_str('')
                 except Exception as e:
-                    pbar.set_postfix_str(f'{v.stem}: FAIL - {e}')
+                    pbar.set_postfix_str(f'seg{s["seg_idx"]}: {e}')
+                pbar.update(1)
+
+    shutil.rmtree(str(Path(args.output_dir) / '.tmp'), ignore_errors=True)
+
+    preprocess_dataset(args.output_dir)
 
     elapsed = time.perf_counter() - t0
     print(f'\nDone in {elapsed:.0f}s')

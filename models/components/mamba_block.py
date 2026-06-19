@@ -49,6 +49,8 @@ class SSMBlock(nn.Module):
             out = self.ssm(x)
             new_state = out[:, -1]
         else:
+            if state is None:
+                state = x.new_zeros(x.size(0), self.ssm.d_state)
             out, new_state = self.ssm(x, state)
         out = self.norm(out)
         return out, new_state
@@ -61,5 +63,4 @@ class SequenceProcessor(nn.Module):
 
     def forward(self, x: torch.Tensor, h_state: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         out, new_state = self.ssm(x, h_state)
-        pooled = out.mean(dim=1)
-        return pooled, new_state
+        return out, new_state
