@@ -100,6 +100,25 @@ class ParallelExperts(nn.Module):
         nn.init.kaiming_uniform_(self.up2_weight, a=5**0.5)
         nn.init.zeros_(self.up2_bias)
 
+    def _apply(self, fn):
+        def wrapped_fn(t):
+            if t.dim() != 4:
+                device = None
+                dtype = None
+                non_blocking = False
+                if hasattr(fn, "__closure__") and fn.__closure__:
+                    for cell in fn.__closure__:
+                        val = cell.cell_contents
+                        if isinstance(val, torch.device):
+                            device = val
+                        elif isinstance(val, torch.dtype):
+                            dtype = val
+                        elif isinstance(val, bool):
+                            non_blocking = val
+                return t.to(device=device, dtype=dtype, non_blocking=non_blocking)
+            return fn(t)
+        return super()._apply(wrapped_fn)
+
     def forward(self, x: torch.Tensor, idx: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
         k = idx.shape[1]
