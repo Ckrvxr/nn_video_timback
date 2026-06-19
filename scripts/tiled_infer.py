@@ -56,12 +56,13 @@ def tiled_mamba_inference(model, x, tile_size=1024, overlap=64):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Tiled MambaFixer inference')
+    parser = argparse.ArgumentParser(description='MambaFixer inference')
     parser.add_argument('checkpoint', type=str, help='Path to .pth checkpoint')
     parser.add_argument('input', type=str, help='Input compressed video (.mp4)')
     parser.add_argument('--output', '-o', type=str, default=None, help='Output video path')
     parser.add_argument('--config', type=str, default='configs/mamba.yaml')
     parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--tiled', action='store_true', help='Enable tiled inference to save VRAM')
     parser.add_argument('--tile-size', type=int, default=1024)
     parser.add_argument('--overlap', type=int, default=64)
     return parser.parse_args()
@@ -76,11 +77,21 @@ def main():
     if device.type == 'cuda':
         torch.backends.cudnn.benchmark = True
 
+    arch_cfg = config['model_architecture']
     model = MambaFixer(
-        num_features=config['model_architecture'].get('num_features', 16),
-        state_dimension=config['model_architecture'].get('state_dimension', 16),
+        num_features=arch_cfg.get('num_features', 64),
+        state_dimension=arch_cfg.get('state_dimension', 32),
+        num_features_stream=arch_cfg.get('num_features_stream', 2),
+        num_experts=arch_cfg.get('num_experts', 100),
+        n_active=arch_cfg.get('n_active', 2),
+        dilation_rates=arch_cfg.get('dilation_rates', [1, 2, 4, 32]),
+        routing_threshold=arch_cfg.get('routing_threshold', 0.90)
     ).to(device)
     model.eval()
+
+    use_half = config.get('inference_settings', {}).get('use_half_precision', True)
+    if use_half:
+        model = model.half()
 
     ckpt = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt)
@@ -109,9 +120,11 @@ def main():
             f_np = np.stack([y, u, v], axis=-1)
             
             f = torch.from_numpy(f_np).float().permute(2, 0, 1).unsqueeze(0).to(device) / 127.5 - 1.0
+            if use_half:
+                f = f.half()
             
-            # Tiled inference
-            if w > args.tile_size or h > args.tile_size:
+            # Direct or Tiled inference
+            if args.tiled:
                 pred = tiled_mamba_inference(model, f, tile_size=args.tile_size, overlap=args.overlap)
             else:
                 pred = ictcp_to_yuv(model(yuv_to_ictcp(f)))

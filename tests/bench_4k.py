@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 from models import MambaFixer
-from scripts.tiled_infer import tiled_mamba_inference
+from models.components import yuv_to_ictcp, ictcp_to_yuv
 
 @torch.no_grad()
 def run_benchmark():
@@ -70,7 +70,8 @@ def run_benchmark():
         # Warmup runs
         print("  Warming up (3 runs)...")
         for _ in range(3):
-            _ = tiled_mamba_inference(model, x, tile_size=1024, overlap=64)
+            model.reset_state(1, device)
+            _ = ictcp_to_yuv(model(yuv_to_ictcp(x)))
         if device.type == 'cuda':
             torch.cuda.synchronize()
             
@@ -80,7 +81,7 @@ def run_benchmark():
         t_start = time.perf_counter()
         for _ in range(runs):
             model.reset_state(1, device)
-            _ = tiled_mamba_inference(model, x, tile_size=1024, overlap=64)
+            _ = ictcp_to_yuv(model(yuv_to_ictcp(x)))
         if device.type == 'cuda':
             torch.cuda.synchronize()
         t_end = time.perf_counter()
