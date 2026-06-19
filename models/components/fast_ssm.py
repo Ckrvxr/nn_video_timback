@@ -91,7 +91,7 @@ if HAS_TRITON:
             N = A.shape[-1]
 
             state = state.clone()
-            s_save = torch.empty(B, L, N, device=hx.device, dtype=hx.dtype)
+            s_save = torch.empty(B, L, N, device=hx.device, dtype=state.dtype)
             out = torch.empty_like(hx)
 
             grid = (B,)
@@ -172,7 +172,10 @@ class FastSSM(nn.Module):
         u = x @ B.T + b
 
         if HAS_TRITON and x.is_cuda:
-            out, new_state = _SSMFn.apply(hx, u, state, A, W_s.T)
+            out, new_state = _SSMFn.apply(
+                hx.float(), u.float(), state.float(), A.float(), W_s.T.float())
+            out = out.to(dtype=x.dtype)
+            new_state = new_state.to(dtype=x.dtype)
         else:
             # PyTorch fallback loop
             B_sz, L_sz, _ = hx.shape
