@@ -71,7 +71,7 @@ class MambaFixer(nn.Module):
         i_ch = ictcp[:, 0:1]
         feat = self.downsample(i_ch)
 
-        flat = feat.view(B, self.num_features, -1).transpose(1, 2)  # [B, 4096, num_features]
+        flat = feat.view(B, self.num_features, -1).transpose(1, 2)  # [B, 256, num_features]
 
         out_fwd, _ = self.ssm_fwd(flat, None)
         z_fwd = out_fwd.mean(dim=1)
