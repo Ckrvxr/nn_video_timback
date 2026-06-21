@@ -57,4 +57,4 @@ class MoERouter(nn.Module):
         probs = F.softmax(logits, dim=-1)
         weights = probs.mean(dim=0)
         target = torch.ones(self.n_experts, device=logits.device) / self.n_experts
-        return F.kl_div((weights + 1e-8).log(), target, reduction='sum')
+        return (weights - target).pow(2).sum() * self.n_experts

@@ -2,9 +2,6 @@
 .pixi/
 pixi.lock
 
-# Python
-
-
 # Runs
 runs/
 *.log

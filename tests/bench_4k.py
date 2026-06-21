@@ -3,12 +3,35 @@ import time
 from pathlib import Path
 from yaml import safe_load
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest
 import torch
 from models import MambaFixer
 from models.components import yuv_to_ictcp, ictcp_to_yuv
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_bench_4k_model_instantiation():
+    config = safe_load(open('configs/mamba.yaml'))
+    arch_cfg = config['model_architecture']
+    model = MambaFixer(
+        num_features=arch_cfg.get('num_features', 64),
+        state_dimension=arch_cfg.get('state_dimension', 32),
+        num_features_stream=arch_cfg.get('num_features_stream', 2),
+        num_experts=arch_cfg.get('num_experts', 100),
+        n_active=arch_cfg.get('n_active', 2),
+        dilation_rates=arch_cfg.get('dilation_rates', [1, 2, 4, 32]),
+        routing_threshold=arch_cfg.get('routing_threshold', 0.90),
+    ).to('cuda')
+    model.eval()
+    x = torch.randn(1, 3, 256, 256, device='cuda')
+    model.reset_state(1, 'cuda')
+    y = ictcp_to_yuv(model(yuv_to_ictcp(x)))
+    assert y.shape == x.shape
+    assert not torch.isnan(y).any()
+    assert not torch.isinf(y).any()
+
 
 @torch.no_grad()
 def run_benchmark():

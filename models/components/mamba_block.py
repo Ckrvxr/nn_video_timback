@@ -43,11 +43,13 @@ class SSMBlock(nn.Module):
         else:
             self.ssm = FastSSM(d_model, d_state)
         self.norm = nn.LayerNorm(d_model)
+        # Always project hidden state to d_state for consistent routing
+        self.state_proj = nn.Linear(d_model, d_state)
 
     def forward(self, x: torch.Tensor, state: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         if HAS_MAMBA:
             out = self.ssm(x)
-            new_state = out[:, -1]
+            new_state = self.state_proj(out[:, -1])
         else:
             if state is None:
                 state = x.new_zeros(x.size(0), self.ssm.d_state)

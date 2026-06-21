@@ -227,26 +227,19 @@ def _plan_segments(video_path: Path, args) -> list[dict] | None:
     num_slices = args.num_slices if args.num_slices is not None else 3
     lr_padding = 90
     seg_frames = args.num_frames + 2 * lr_padding
-    total_needed = num_slices * seg_frames
-    if total_needed > valid_range:
+    if seg_frames > valid_range:
         raise ValueError(
-            f'{video_path.name}: {num_slices}×{seg_frames}={total_needed} frames needed, '
+            f'{video_path.name}: {seg_frames} frames needed per segment, '
             f'but only {valid_range} frames available after trimming '
             f'[{trim}]×2 from {total_frames}')
 
-    remaining_gap = valid_range - total_needed
-    cuts = sorted(rng.random() for _ in range(num_slices))
-    props = [cuts[0]] + [cuts[i] - cuts[i - 1] for i in range(1, num_slices)] + [1 - cuts[-1]]
-    gaps = [int(round(remaining_gap * p)) for p in props]
-    diff = remaining_gap - sum(gaps)
-    if diff != 0:
-        gaps[rng.randint(0, num_slices)] += diff
-
+    stride = valid_range / num_slices
     starts = []
-    pos = valid_start + gaps[0]
     for i in range(num_slices):
-        starts.append(pos)
-        pos += seg_frames + gaps[i + 1]
+        nominal = valid_start + int(round(i * stride))
+        jitter = int(round(stride * rng.uniform(-0.2, 0.2)))
+        start = max(valid_start, min(valid_end - seg_frames, nominal + jitter))
+        starts.append(start)
 
     print(f'  {video_path.name}: source_bits={source_bits}, HR={hr_pix}')
 
@@ -482,7 +475,7 @@ def _preprocess_one_segment(seg_dir: Path, crop_info: tuple,
 
     Files are pre-trimmed to the exact window, so always read from frame 0.
     """
-    from utils.video_loader import load_video_frame_range
+    from utils.data.video_loader import load_video_frame_range
 
     yuv = load_video_frame_range(str(seg_dir / 'HR.mkv'), 0, num_frames)
     hr_p = _batch_yuv_to_ictcp_crop_gpu(yuv, crop_info[:2] + (num_frames,))
@@ -504,7 +497,7 @@ def _preprocess_one_segment(seg_dir: Path, crop_info: tuple,
 
 def preprocess_dataset(data_dir: str, num_frames: int = 30, patch_size: int = 512):
     """Walk named dirs, ICtCp HR.mkv+LR.mp4 → hr.npy/lr.npy/meta.json in-place."""
-    from utils.video_loader import probe_resolution, probe_frame_count
+    from utils.data.video_loader import probe_resolution, probe_frame_count
     data_path = Path(data_dir)
     dirs = sorted(d for d in data_path.iterdir()
                   if d.is_dir() and d.name != '.tmp')

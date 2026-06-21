@@ -1,60 +1,28 @@
-import sys
-from pathlib import Path
-
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from tests.helpers import mock_triton, mock_mamba_ssm
+mock_triton()
+mock_mamba_ssm()
 
 import torch
 from models import MambaFixer
 
-def test_mamba_fixer_forward():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}")
-    
-    # Initialize model with test config settings
-    print("Initializing MambaFixer with num_features=16...")
-    model = MambaFixer(num_features=16, state_dimension=8, num_features_stream=2, num_experts=4, n_active=2).to(device)
-    model.eval()
-    
-    # Create random input tensor (batch_size=2, channels=3, height=32, width=32)
-    x = torch.randn(2, 3, 32, 32, device=device)
-    
-    # Reset state
-    model.reset_state(2, device)
-    
-    # Run forward pass
-    print("Running forward pass...")
-    out = model(x)
-    
-    print(f"Output shape: {out.shape}")
-    assert out.shape == (2, 3, 32, 32), f"Expected shape (2, 3, 32, 32), got {out.shape}"
-    print("Test passed successfully!")
 
-def test_mamba_fixer_adaptive_routing():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print("Initializing MambaFixer with adaptive routing (threshold=0.85)...")
+def test_mamba_fixer_forward(small_mamba_fixer, device):
+    x = torch.randn(2, 3, 32, 32, device=device)
+    small_mamba_fixer.reset_state(2, device)
+    out = small_mamba_fixer(x)
+    assert out.shape == (2, 3, 32, 32)
+
+
+def test_mamba_fixer_adaptive_routing(device):
     model = MambaFixer(
-        num_features=16,
-        state_dimension=8,
-        num_features_stream=2,
-        num_experts=10,
-        n_active=4,
-        routing_threshold=0.85
+        num_features=16, state_dimension=8, num_features_stream=2,
+        num_experts=10, n_active=4, routing_threshold=0.85,
     ).to(device)
     model.eval()
-    
     x = torch.randn(2, 3, 32, 32, device=device)
     model.reset_state(2, device)
-    
-    print("Running forward pass with adaptive routing...")
     out = model(x)
-    
     assert out.shape == (2, 3, 32, 32)
     last_idx = model._last_expert_idx
     assert last_idx.shape == (2, 4)
-    assert ((last_idx >= -1) & (last_idx < 10)).all(), f"Indices out of range: {last_idx}"
-    print("Adaptive routing test passed successfully!")
-
-if __name__ == '__main__':
-    test_mamba_fixer_forward()
-    test_mamba_fixer_adaptive_routing()
+    assert ((last_idx >= -1) & (last_idx < 10)).all()

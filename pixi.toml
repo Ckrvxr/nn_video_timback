@@ -17,6 +17,7 @@ pyyaml = "*"
 tqdm = "*"
 av = ">=15.1.0,<18"
 python-blosc = ">=1.11.4,<2"
+pytest = ">=9.1.1,<10"
 
 [pypi-dependencies]
 loguru = "*"

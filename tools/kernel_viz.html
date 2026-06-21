@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dilated Conv 空洞可视化</title>
+<style>
+* { margin: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #e0e0e0; font: 14px/1.5 "Segoe UI", sans-serif; padding: 20px; }
+h1 { font-size: 20px; margin-bottom: 16px; color: #fff; }
+.controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 18px; }
+.controls label { display: flex; align-items: center; gap: 6px; }
+.controls select, .controls button { padding: 5px 12px; border: 1px solid #444; border-radius: 6px; background: #16213e; color: #e0e0e0; font: 13px sans-serif; cursor: pointer; }
+.controls button:hover { background: #1a3a6e; }
+.controls .hint { color: #888; font-size: 12px; }
+.layer-list { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.layer-tag { background: #0f3460; padding: 3px 10px; border-radius: 4px; font-size: 13px; display: flex; gap: 6px; align-items: center; }
+.layer-tag .del { cursor: pointer; color: #e94560; font-weight: bold; }
+.stats { display: flex; gap: 20px; margin-bottom: 14px; font-size: 14px; }
+.stats span { background: #16213e; padding: 6px 14px; border-radius: 6px; }
+.stats .val { color: #f5c842; font-weight: bold; }
+.viz { margin-bottom: 20px; }
+.viz h3 { font-size: 14px; color: #aaa; margin-bottom: 6px; }
+#checker1d { display: flex; flex-wrap: wrap; gap: 1px; margin-bottom: 8px; }
+#checker1d .cell { width: 20px; height: 20px; border-radius: 2px; text-align: center; line-height: 20px; font-size: 9px; color: rgba(255,255,255,0.5); }
+#checker2d { display: grid; gap: 1px; margin-bottom: 8px; width: fit-content; }
+#checker2d .cell { width: 14px; height: 14px; border-radius: 2px; }
+.grid-wrap { overflow-x: auto; }
+.legend { display: flex; gap: 14px; font-size: 12px; margin-bottom: 12px; }
+.legend-item { display: flex; align-items: center; gap: 4px; }
+.swatch { width: 14px; height: 14px; border-radius: 2px; display: inline-block; }
+legend-table { margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<h1>🧊 Dilated Conv — 采样点 &amp; 空洞可视化</h1>
+
+<div class="controls">
+  <label>Kernel <select id="kernelSel">
+    <option value="3" selected>3×3</option>
+    <option value="5">5×5</option>
+    <option value="7">7×7</option>
+  </select></label>
+  <label>dilation <input id="dilInput" type="number" min="1" max="32" value="1" style="width:50px;padding:4px;border:1px solid #444;border-radius:4px;background:#16213e;color:#e0e0e0;font:13px;"></label>
+  <button id="addBtn">+ 添加层</button>
+  <span class="hint">已选层：</span>
+  <div class="layer-list" id="layerList"></div></div>
+
+<div class="controls" style="margin-top:-6px">
+  <span class="hint">预设：</span>
+  <button data-preset="[1]">[1]</button>
+  <button data-preset="[2,3]">[2,3]</button>
+  <button data-preset="[1,4]">[1,4]</button>
+  <button data-preset="[1,3,4]">[1,3,4]</button>
+  <button data-preset="[3,4]">[3,4]</button>
+  <button data-preset="[2,5]">[2,5]</button>
+  <button data-preset="[1,7]">[1,7]</button>
+  <button data-preset="[1,2,4,8]">[1,2,4,8]</button>
+  <button data-preset="[]" style="color:#e94560">清空</button>
+</div>
+
+<div class="stats" id="stats">
+  <span>感受野 <span class="val" id="rfVal">1</span></span>
+  <span>覆盖 <span class="val" id="coverVal">1</span> / <span id="totalVal">1</span></span>
+  <span>覆盖率 <span class="val" id="rateVal">100</span>%</span>
+  <span>空洞 <span class="val" id="holeVal" style="color:#e94560">0</span></span>
+</div>
+
+<div class="legend">
+  <span class="legend-item"><span class="swatch" style="background:#4ecca3"></span> 已覆盖</span>
+  <span class="legend-item"><span class="swatch" style="background:#e94560"></span> 空洞</span>
+  <span class="legend-item"><span class="swatch" style="background:#1a3a6e;border:1px solid #555"></span> RF 边界外</span>
+</div>
+
+<div class="viz">
+  <h3>1D 剖面（RF 中心行）</h3>
+  <div id="checker1d"></div>
+</div>
+
+<div class="viz">
+  <h3>2D 平面鸟瞰</h3>
+  <div class="grid-wrap" id="checker2dWrap"><div id="checker2d"></div></div>
+</div>
+
+<div id="layerDetail" style="font-size:12px;color:#888;line-height:1.6;"></div>
+
+<script>
+// ——— state ———
+let dilations = [];
+
+// ——— compute coverage ———
+function compute(k, ds) {
+  // Minkowski sum of per-layer offset sets
+  if (ds.length === 0) return new Set([0]);
+  const half = (k - 1) / 2;
+  let sets = ds.map(d => {
+    const s = new Set();
+    for (let i = -half; i <= half; i++) s.add(i * d);
+    return s;
+  });
+  let union = new Set(sets[0]);
+  for (let i = 1; i < sets.length; i++) {
+    const next = new Set();
+    for (const a of union)
+      for (const b of sets[i])
+        next.add(a + b);
+    union = next;
+  }
+  return union;
+}
+
+function rf(k, ds) {
+  if (ds.length === 0) return 1;
+  let effective = 0;
+  for (const d of ds) effective += (k - 1) * d;
+  return effective + 1;
+}
+
+// ——— render ———
+function render() {
+  const k = parseInt(document.getElementById('kernelSel').value);
+  const ds = dilations.slice();
+  const covered = compute(k, ds);
+  const rfSize = rf(k, ds);
+  const halfRf = (rfSize - 1) / 2;
+
+  // stats
+  let totalCells = rfSize * rfSize;
+  let coveredCount = 0;
+  for (let y = -halfRf; y <= halfRf; y++)
+    for (let x = -halfRf; x <= halfRf; x++)
+      if (covered.has(y) && covered.has(x)) coveredCount++;
+  let holeCount = totalCells - coveredCount;
+  let rate = totalCells > 0 ? (coveredCount / totalCells * 100) : 0;
+
+  document.getElementById('rfVal').textContent = rfSize;
+  document.getElementById('coverVal').textContent = coveredCount;
+  document.getElementById('totalVal').textContent = totalCells;
+  document.getElementById('rateVal').textContent = rate.toFixed(1);
+  document.getElementById('holeVal').textContent = holeCount;
+
+  // 1D
+  const c1d = document.getElementById('checker1d');
+  c1d.innerHTML = '';
+  for (let x = -halfRf; x <= halfRf; x++) {
+    const d = document.createElement('div');
+    d.className = 'cell';
+    const hit = covered.has(0) && covered.has(x);
+    d.style.background = hit ? '#4ecca3' : '#e94560';
+    d.textContent = x;
+    c1d.appendChild(d);
+  }
+
+  // 2D
+  const c2d = document.getElementById('checker2d');
+  c2d.innerHTML = '';
+  c2d.style.gridTemplateColumns = `repeat(${rfSize}, 14px)`;
+  for (let y = -halfRf; y <= halfRf; y++) {
+    for (let x = -halfRf; x <= halfRf; x++) {
+      const d = document.createElement('div');
+      d.className = 'cell';
+      const hit = covered.has(y) && covered.has(x);
+      d.style.background = hit ? '#4ecca3' : '#e94560';
+      c2d.appendChild(d);
+    }
+  }
+
+  // Layer info
+  const detail = document.getElementById('layerDetail');
+  if (ds.length === 0) {
+    detail.textContent = '无 dilated 层（仅 down+up，RF=1×1）';
+  } else {
+    let lines = [];
+    let setAcc = new Set([0]);
+    const half = (k - 1) / 2;
+    for (let i = 0; i < ds.length; i++) {
+      const d = ds[i];
+      const cur = new Set();
+      for (let j = -half; j <= half; j++) cur.add(j * d);
+      const next = new Set();
+      for (const a of setAcc) for (const b of cur) next.add(a + b);
+      setAcc = next;
+      const layerRf = [...setAcc].reduce((a,b) => Math.max(a, Math.abs(b)), 0) * 2 + 1;
+      const pts = [...setAcc].sort((a,b) => a - b);
+      lines.push(`层${i+1} (d=${d})：采样 ${cur.size} 点 {${[...cur].sort((a,b)=>a-b).join(',')}} → 累计偏移 {${pts.join(',')}}，累计RF=${layerRf}`);
+    }
+    detail.innerHTML = lines.join('<br>');
+  }
+}
+
+// ——— UI ———
+function rebuildLayerList() {
+  const div = document.getElementById('layerList');
+  div.innerHTML = '';
+  dilations.forEach((d, i) => {
+    const tag = document.createElement('span');
+    tag.className = 'layer-tag';
+    tag.innerHTML = `d=${d} <span class="del" data-i="${i}">✕</span>`;
+    tag.querySelector('.del').onclick = () => { dilations.splice(i,1); rebuildLayerList(); render(); };
+    div.appendChild(tag);
+  });
+}
+
+document.getElementById('addBtn').onclick = () => {
+  const v = parseInt(document.getElementById('dilInput').value);
+  if (v > 0) {
+    dilations.push(v);
+    rebuildLayerList();
+    render();
+  }
+};
+
+document.getElementById('kernelSel').onchange = render;
+
+// presets
+document.querySelectorAll('[data-preset]').forEach(btn => {
+  btn.onclick = () => {
+    const raw = btn.dataset.preset;
+    dilations = raw === '[]' ? [] : JSON.parse(raw);
+    rebuildLayerList();
+    render();
+  };
+});
+
+// enter key on input
+document.getElementById('dilInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('addBtn').click();
+});
+
+// init: [1,3,4]
+dilations = [1, 3, 4];
+rebuildLayerList();
+render();
+</script>
+</body>
+</html>

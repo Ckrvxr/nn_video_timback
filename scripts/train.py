@@ -21,22 +21,21 @@ def sigint_handler(signum, frame):
     global EXIT_FLAG, RUN_DIR
     if os.getpid() != MAIN_PID:
         return
-    # Ignore signal during interactive menu
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    print("\n\n=== Training Paused (Ctrl+C detected) ===")
-    print("Select an option:")
-    print("  [c] Continue training")
+    print()
+    print("\033[1;33m═══ Training Paused (Ctrl+C detected) ═══\033[0m")
+    print("  \033[1;37m[c]\033[0m Continue training")
     if RUN_DIR:
-        print("  [p] Pause training (creates .pause file, delete it to resume)")
-    print("  [s] Save checkpoint and exit gracefully")
-    print("  [e] Exit immediately without saving")
-    
+        print("  \033[1;37m[p]\033[0m Pause (create \033[3m.pause\033[0m file, delete to resume)")
+    print("  \033[1;37m[s]\033[0m Save checkpoint and exit")
+    print("  \033[1;37m[e]\033[0m Exit immediately")
+
     while True:
         try:
-            prompt = "Choice [c/p/s/e]: " if RUN_DIR else "Choice [c/s/e]: "
+            prompt = "\033[1;36mChoice [c/p/s/e]: \033[0m" if RUN_DIR else "\033[1;36mChoice [c/s/e]: \033[0m"
             choice = input(prompt).strip().lower()
             if choice == 'c':
-                print("Resuming training...")
+                print("\033[32mResuming training...\033[0m")
                 if RUN_DIR:
                     pause_file = RUN_DIR / '.pause'
                     if pause_file.exists():
@@ -50,22 +49,22 @@ def sigint_handler(signum, frame):
                 pause_file = RUN_DIR / '.pause'
                 try:
                     pause_file.touch()
-                    print(f"Created '{pause_file}'. Training is now paused.")
-                    print("To resume: delete this file, or press Ctrl+C again to choose another option.")
+                    print(f"\033[33mCreated '{pause_file}'. Training is now paused.\033[0m")
+                    print("To resume: delete the .pause file, or press Ctrl+C again.")
                 except Exception as e:
-                    print(f"Error creating pause file: {e}")
+                    print(f"\033[31mError creating pause file: {e}\033[0m")
                 signal.signal(signal.SIGINT, sigint_handler)
                 return
             elif choice == 's':
-                print("Graceful exit requested. Will save checkpoint and stop at next batch/epoch.")
+                print("\033[33mGraceful exit requested. Will save checkpoint...\033[0m")
                 EXIT_FLAG = True
                 signal.signal(signal.SIGINT, lambda s, f: os._exit(1))
                 return
             elif choice == 'e':
-                print("Exiting immediately...")
+                print("\033[31mExiting immediately...\033[0m")
                 os._exit(1)
         except (EOFError, KeyboardInterrupt):
-            print("\nExiting immediately...")
+            print("\n\033[31mExiting immediately...\033[0m")
             os._exit(1)
         except Exception:
             pass
@@ -99,11 +98,11 @@ from tqdm import tqdm
 
 from models import MambaFixer
 from models.components.color_space import yuv_to_rgb, ictcp_to_yuv
-from losses.composite import CompositeLoss
-from utils.console import console
-from utils.dataset import create_dataloader
-from utils.metrics import calculate_psnr_batch, calculate_ssim_batch
-from utils.sam import SAM
+from utils.training.losses.composite import CompositeLoss
+from utils.console import console, section, sub_section, metric, divider
+from utils.data.dataset import create_dataloader
+from utils.evaluation.metrics import calculate_psnr_batch, calculate_ssim_batch
+from utils.training.sam import SAM
 
 
 # Global background writer for checkpoints / metrics so that disk IO does not
@@ -177,10 +176,10 @@ def check_memory(config, force: bool = False):
             rss_after = proc.memory_info().rss
             ratio_after = rss_after / total
             if ratio_after > max_ram_ratio * 1.1:
-                console.warning(f"RAM 仍超限: {ratio_after*100:.0f}% (上限 {max_ram_ratio*100:.0f}%)")
+                console.warning(f"RAM still above threshold: {ratio_after*100:.0f}% (limit {max_ram_ratio*100:.0f}%)")
                 gc.collect()
             elif ratio_after > max_ram_ratio:
-                console.info(f"GC 后 RAM: {ratio_after*100:.0f}% (上限 {max_ram_ratio*100:.0f}%)")
+                console.info(f"RAM after GC: {ratio_after*100:.0f}% (limit {max_ram_ratio*100:.0f}%)")
             ram_exceeded = ratio_after > max_ram_ratio
 
     if max_vram_ratio > 0 and torch.cuda.is_available():
@@ -193,9 +192,9 @@ def check_memory(config, force: bool = False):
             allocated_after = torch.cuda.memory_allocated(dev)
             ratio_after = allocated_after / total_vram
             if ratio_after > max_vram_ratio * 1.1:
-                console.warning(f"显存仍超限: {ratio_after*100:.0f}% (上限 {max_vram_ratio*100:.0f}%)")
+                console.warning(f"VRAM still above threshold: {ratio_after*100:.0f}% (limit {max_vram_ratio*100:.0f}%)")
             elif ratio_after > max_vram_ratio:
-                console.info(f"empty_cache 后显存: {ratio_after*100:.0f}% (上限 {max_vram_ratio*100:.0f}%)")
+                console.info(f"VRAM after empty_cache: {ratio_after*100:.0f}% (limit {max_vram_ratio*100:.0f}%)")
             vram_exceeded = ratio_after > max_vram_ratio
 
     return ram_exceeded, vram_exceeded
@@ -225,7 +224,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, run_dir: Path, output_di
 
 
 
-def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None, batch_times=None, run_dir=None):
+def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None, batch_times=None, run_dir=None, epoch=0, n_epochs=0):
     global EXIT_FLAG
     device = torch.device(device)
     model.train()
@@ -301,6 +300,7 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
 
         def run_forward():
             nonlocal prev_video_id
+            moe_weight = config['loss_weights'].get('moe', 0.01)
             if sequential:
                 video_id = batch.get('video_id', -1)
                 if video_id != prev_video_id:
@@ -311,7 +311,7 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                     if t == center_idx:
                         pred = model(lr[:, t].to(memory_format=torch.channels_last))
                         loss_dict = criterion(pred, hr.to(memory_format=torch.channels_last))
-                        loss_dict['moe'] = model._balancing_loss * 1.0 if getattr(model, '_balancing_loss', None) is not None else torch.tensor(0.0, device=device)
+                        loss_dict['moe'] = model._balancing_loss * moe_weight if getattr(model, '_balancing_loss', None) is not None else torch.tensor(0.0, device=device)
                         if hasattr(model, '_balancing_loss'):
                             model._balancing_loss = None  # Clear graph reference immediately
                         loss_dict['total'] = loss_dict['total'] + loss_dict['moe']
@@ -330,7 +330,7 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                 model.reset_state(lr.size(0), device)
                 pred = model(lr[:, center_idx].to(memory_format=torch.channels_last))
                 loss_dict = criterion(pred, hr.to(memory_format=torch.channels_last))
-                loss_dict['moe'] = model._balancing_loss * 0.1 if getattr(model, '_balancing_loss', None) is not None else torch.tensor(0.0, device=device)
+                loss_dict['moe'] = model._balancing_loss * moe_weight if getattr(model, '_balancing_loss', None) is not None else torch.tensor(0.0, device=device)
                 if hasattr(model, '_balancing_loss'):
                     model._balancing_loss = None  # Clear graph reference immediately
                 loss_dict['total'] = loss_dict['total'] + loss_dict['moe']
@@ -414,7 +414,6 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                             if opt_state is not None:
                                 for dev in opt_state['found_inf_per_device'].keys():
                                     opt_state['found_inf_per_device'][dev].fill_(1.0)
-                        
                         # Restore original parameters manually
                         for group in optimizer.param_groups:
                             for p in group["params"]:
@@ -455,15 +454,20 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
             total_selections = expert_counts.sum().item()
             if total_selections > 0:
                 n_experts = expert_counts.size(0)
-                console.info(f"\n🏆 Expert Heatmap (Batch {batch_idx + 1}/{n_batches})")
-                console.info("─" * 130)
+                console.opt(colors=True).info(
+                    "<bold><cyan>═══ Expert Utilization (Epoch {}/{}, Batch {}/{}) ═══</cyan></bold>",
+                    epoch + 1, n_epochs, batch_idx + 1, n_batches,
+                )
+                console.opt(colors=True).info("<dim>Legend: </dim>"
+                    "<red>≥20%</red> <dim>|</dim> <yellow>≥10%</yellow> <dim>|</dim> "
+                    "<green>≥5%</green> <dim>|</dim> <blue>≥1%</blue> <dim>|</dim> <dim>&lt;1%</dim>")
 
                 def heat_color(pct):
                     if pct >= 20: return "red"
                     if pct >= 10: return "yellow"
                     if pct >= 5:  return "green"
                     if pct >= 1:  return "blue"
-                    return "white"
+                    return "dim"
 
                 for row_start in range(0, n_experts, 10):
                     cells = []
@@ -476,13 +480,25 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                         color = heat_color(pct)
                         cells.append(f"<{color}>E{idx:02d} {pct:>5.1f}%</{color}>")
                     console.opt(colors=True).info("  ".join(cells))
-                console.info("─" * 95)
-                loss_parts = []
-                for name, val in loss_dict.items():
-                    if name != 'total':
-                        loss_parts.append(f"{name}={val.item():.6f}")
-                console.info("Loss: " + "  ".join(loss_parts))
-                console.info("─" * 95)
+                divider()
+                # Top-5 experts (plain text; color tags in substitutions won't render)
+                top5 = expert_counts.topk(5)
+                top_pairs = "  ".join(
+                    f"E{idx} {cnt/total_selections*100:.1f}%"
+                    for idx, cnt in zip(top5.indices.tolist(), top5.values.tolist())
+                )
+                # Loss breakdown (plain text; color only from template below)
+                loss_parts = "  ".join(
+                    f"{name}={val.item():.6f}"
+                    for name, val in loss_dict.items() if name != 'total'
+                )
+                lr_val = optimizer.param_groups[0]['lr']
+                console.opt(colors=True).info(
+                    '<level>{}</level>  <green>loss</green>=<yellow>{:.6f}</yellow>  <cyan>lr={:.2e}</cyan>',
+                    loss_parts, batch_loss, lr_val,
+                )
+                console.opt(colors=True).info('<green>Top-5:</green> {}', top_pairs)
+                divider()
 
         t_now = time.perf_counter()
         batch_time = t_now - t_batch_start
@@ -494,8 +510,9 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
         samples_sec = bs / batch_time if batch_time > 0 else 0
         
         pbar.set_postfix(
-            total=f"{batch_loss:.6f}",
-            **{k: f"{v.item():.6f}" for k, v in loss_dict.items() if k != 'total'},
+            loss=f"{batch_loss:.6f}",
+            **{n: f"{v.item():.6f}" for n, v in loss_dict.items() if n != 'total'},
+            lr=f"{optimizer.param_groups[0]['lr']:.2e}",
         )
         pbar.update(bs)
 
@@ -553,7 +570,7 @@ def validate(model, val_loader, device, max_samples=100, num_vmaf_samples=0):
         n += take
 
         if num_vmaf_samples > 0 and n_vmaf < num_vmaf_samples:
-            from utils.vmaf import compute_vmaf
+            from utils.evaluation.vmaf import compute_vmaf
             for b in range(min(take, num_vmaf_samples - n_vmaf)):
                 total_fpsnr += compute_vmaf(pred_yuv[b:b+1], hr_yuv[b:b+1])
                 n_vmaf += 1
@@ -573,7 +590,6 @@ def main():
         set_seed(seed)
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    console.info(f'Using device: {device}')
 
     if device.type == 'cuda':
         torch.backends.cudnn.benchmark = True
@@ -586,10 +602,10 @@ def main():
     logging_cfg = config['logging_settings']
 
     model_name = model_cfg.get('model_name', 'hyper_fixer')
-    console.info(f'Model: {model_name}')
+
+    section("Training Setup")
 
     if model_name == 'hyper_fixer':
-        # Removed
         pass
     elif model_name == 'mamba_fixer':
         model = MambaFixer(
@@ -602,6 +618,14 @@ def main():
             routing_threshold=model_cfg.get('routing_threshold', 1.0),
         ).to(device, memory_format=torch.channels_last)
 
+    sub_section("Model")
+    metric("Name", model_name)
+    metric("Device", str(device))
+    n_params = sum(p.numel() for p in model.parameters())
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    metric("Parameters", f"{n_params:,}")
+    metric("Trainable", f"{n_trainable:,}")
+
     if training_cfg.get('enable_torch_compile', False):
         console.info('Compiling model with torch.compile (reduce-overhead)...')
         try:
@@ -610,11 +634,20 @@ def main():
             console.warning(f'Compilation failed: {e}')
             console.warning('Falling back to uncompiled model')
 
+    sub_section("Training")
+    metric("Batch Size", str(training_cfg['batch_size']))
+    metric("Grad Accum", str(training_cfg.get('gradient_accumulation_steps', 1)))
+    metric("Learning Rate", f"{training_cfg['learning_rate']:.2e}")
+    metric("Epochs", str(training_cfg['num_epochs']))
+    metric("Mixed Precision", str(training_cfg.get('use_mixed_precision', False)))
+    metric("SAM", str(training_cfg.get('enable_sam', False)))
+    metric("Loss Weights", str(config['loss_weights']))
+    metric("MoE Weight", str(config['loss_weights'].get('moe', 0.01)))
+
     criterion = CompositeLoss(config['loss_weights'], device=device)
 
     use_sam = training_cfg.get('enable_sam', False)
     if use_sam:
-        console.info("Using SAM (Sharpness-Aware Minimization) optimizer wrapper")
         optimizer = SAM(
             model.parameters(),
             base_optimizer=optim.AdamW,
@@ -649,22 +682,7 @@ def main():
         ckpt = torch.load(args.pretrained, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt)
 
-    train_loader = None
-    val_loader = None
-
-    val_dataset_path = dataset_cfg.get('val_dataset_path')
-    if val_dataset_path:
-        val_loader = create_dataloader(
-            datasets=[val_dataset_path],
-            batch_size=dataset_cfg.get('validation_batch_size', 2),
-            patch_size=dataset_cfg['patch_size'],
-            frames=dataset_cfg['num_frames'],
-            workers=dataset_cfg.get('validation_num_workers', 2),
-            is_train=False,
-            shuffle=True,
-            data_type=data_type,
-        )
-
+    sub_section("Data")
     train_loader = create_dataloader(
         datasets=dataset_cfg['dataset_paths'],
         batch_size=training_cfg['batch_size'],
@@ -676,16 +694,23 @@ def main():
         sequential=dataset_cfg.get('sequential_mode', False),
         data_type=data_type,
     )
-    if val_loader is None:
-        val_loader = create_dataloader(
-            datasets=dataset_cfg['dataset_paths'],
+    metric("Training", f"{len(train_loader.dataset)} samples from {len(dataset_cfg['dataset_paths'])} sources")
+
+    val_dataset_paths = dataset_cfg.get('val_dataset_paths', [])
+    val_loaders = {}
+    for vp in val_dataset_paths:
+        name = Path(vp).name
+        val_loaders[name] = create_dataloader(
+            datasets=[vp],
             batch_size=dataset_cfg.get('validation_batch_size', 2),
             patch_size=dataset_cfg['patch_size'],
             frames=dataset_cfg['num_frames'],
             workers=dataset_cfg.get('validation_num_workers', 2),
             is_train=False,
+            shuffle=True,
             data_type=data_type,
         )
+        metric(f"Val [{name}]", f"{len(val_loaders[name].dataset)} samples")
 
     global RUN_DIR
     output_dir = Path(config['output_directory'])
@@ -696,17 +721,15 @@ def main():
     run_dir.mkdir()
     RUN_DIR = run_dir
 
-    console.info(f"Training run directory created: {run_dir}")
-    console.info(f"To PAUSE training: press Ctrl+C and choose [p], or create file '{run_dir}/.pause'")
-    console.info(f"To EXIT gracefully: press Ctrl+C and choose [s], or create file '{run_dir}/.exit'")
+    metric("Run Dir", str(run_dir))
+    divider()
 
     # ── Baseline (untrained model, cached across runs) ────────────
-    if val_loader is not None:
+    if val_loaders:
         import hashlib
-        # Generate a unique hash based on current validation dataset and model config to prevent stale cache bugs
         config_hash_payload = json.dumps({
             'dataset_paths': dataset_cfg.get('dataset_paths'),
-            'val_dataset_path': dataset_cfg.get('val_dataset_path'),
+            'val_dataset_paths': dataset_cfg.get('val_dataset_paths'),
             'patch_size': dataset_cfg.get('patch_size'),
             'num_frames': dataset_cfg.get('num_frames'),
             'model_name': model_cfg.get('model_name'),
@@ -718,21 +741,24 @@ def main():
 
         if baseline_path.exists():
             baseline = json.load(open(baseline_path))
-            console.info(f"Baseline loaded from cache: psnr={baseline['psnr']:.2f} "
-                         f"| ssim={baseline['ssim']:.4f} | vmaf={baseline['vmaf']:.4f}")
+            sub_section("Baseline (cached)")
+            for name, m in baseline.items():
+                metric(name, f"psnr={m['psnr']:.2f}  ssim={m['ssim']:.4f}  vmaf={m['vmaf']:.4f}")
         else:
-            console.info("Running baseline on validation set (untrained model)...")
-            b_psnr, b_ssim, b_vmaf = validate(model, val_loader, device,
-                                               num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
-            baseline = {'psnr': b_psnr, 'ssim': b_ssim, 'vmaf': b_vmaf}
+            sub_section("Computing Baseline")
+            baseline = {}
+            for name, loader in val_loaders.items():
+                b_psnr, b_ssim, b_vmaf = validate(model, loader, device,
+                                                   num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
+                baseline[name] = {'psnr': b_psnr, 'ssim': b_ssim, 'vmaf': b_vmaf}
+                metric(name, f"psnr={b_psnr:.2f}  ssim={b_ssim:.4f}  vmaf={b_vmaf:.4f}")
             json.dump(baseline, open(baseline_path, 'w'))
-            console.info(f"Baseline: psnr={b_psnr:.2f} | ssim={b_ssim:.4f} | vmaf={b_vmaf:.4f}")
-        # Copy to run_dir for per-run metrics
         json.dump(baseline, open(run_dir / 'baseline.json', 'w'))
-        console.info("─" * 60)
+        divider()
     else:
-        console.info("No validation set configured, skipping baseline.")
-        console.info("─" * 60)
+        sub_section("Baseline")
+        console.info("  No validation sets configured, skipping baseline.")
+        divider()
 
     try:
         for epoch in range(start_epoch, n_epochs):
@@ -772,7 +798,7 @@ def main():
                 console.warning(f"Training gracefully stopped. Saved checkpoint for epoch {max(0, epoch - 1)}.")
                 break
 
-            train_loss = train_epoch(model, train_loader, criterion, optimizer, device, config, scaler, run_dir=run_dir)
+            train_loss = train_epoch(model, train_loader, criterion, optimizer, device, config, scaler, run_dir=run_dir, epoch=epoch, n_epochs=n_epochs)
 
             scheduler.step()
 
@@ -785,13 +811,32 @@ def main():
                 if logging_cfg.get('empty_cuda_cache_on_validation', False):
                     torch.cuda.empty_cache()
 
-                psnr, ssim, vmaf = validate(
-                    model, val_loader, device,
-                    num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
-                
-                vmaf_str = f' | vmaf={vmaf:.4f}' if vmaf > 0 else ''
-                console.info(f'Epoch {epoch}: loss={train_loss:.4f} | psnr={psnr:.2f} | ssim={ssim:.4f}{vmaf_str}')
-                
+                section(f"Epoch {epoch+1}/{n_epochs}  —  loss={train_loss:.4f}  lr={scheduler.get_last_lr()[0]:.2e}")
+                for name, loader in val_loaders.items():
+                    psnr, ssim, vmaf = validate(
+                        model, loader, device,
+                        num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
+                    vmaf_str = f'  vmaf={vmaf:.4f}' if vmaf > 0 else ''
+                    # Color-code PSNR
+                    if psnr >= 35:
+                        psnr_color = "green"
+                    elif psnr >= 30:
+                        psnr_color = "yellow"
+                    else:
+                        psnr_color = "red"
+                    # Baseline delta (plain text; color tags in substitutions won't render)
+                    bl = baseline.get(name, {})
+                    delta_str = ""
+                    if bl:
+                        d = psnr - bl['psnr']
+                        sign = "+" if d >= 0 else ""
+                        delta_str = f"  Δ{sign}{d:.2f} vs baseline"
+                    console.opt(colors=True).info(
+                        "  <white>{}</white>  <{}>psnr={:.2f}</{}>  ssim={:.4f}{}{}",
+                        name, psnr_color, psnr, psnr_color, ssim, vmaf_str, delta_str,
+                    )
+                divider()
+
                 if logging_cfg.get('empty_cuda_cache_on_validation', False):
                     torch.cuda.empty_cache()
 

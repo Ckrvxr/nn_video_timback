@@ -171,7 +171,7 @@ class FastSSM(nn.Module):
         hx = x @ W_x.T + self.fc.bias
         u = x @ B.T + b
 
-        if HAS_TRITON and x.is_cuda:
+        if HAS_TRITON and x.is_cuda and (D & (D - 1)) == 0 and (N & (N - 1)) == 0:
             out, new_state = _SSMFn.apply(
                 hx.float(), u.float(), state.float(), A.float(), W_s.T.float())
             out = out.to(dtype=x.dtype)
