@@ -28,9 +28,11 @@ def test_composite_default_config_uses_only_charbonnier(pred_target):
     pred, target = pred_target
     criterion = CompositeLoss({'charbonnier': 1.0})
     losses = criterion(pred, target)
-    assert set(losses.keys()) == {'char', 'total'}
     assert losses['char'].item() > 0.0
     assert losses['total'].item() == losses['char'].item()
+    # all non-charbonnier losses are 0.0
+    for k in ('wavelet', 'sobel', 'fft', 'rgb', 'ms_ssim'):
+        assert losses[k].item() == 0.0
 
 
 def test_composite_dict_keys(pred_target):
@@ -39,8 +41,12 @@ def test_composite_dict_keys(pred_target):
         'charbonnier': 1.0, 'wavelet': 0.5, 'sobel': 0.05, 'fft': 0.1,
     })
     losses = criterion(pred, target)
-    expected = {'char', 'wavelet', 'sobel', 'fft', 'total'}
-    assert set(losses.keys()) == expected
+    # losses with weight > 0 have non-zero values
+    for k in ('char', 'wavelet', 'sobel', 'fft'):
+        assert losses[k].item() > 0.0
+    # losses with weight = 0 are 0.0
+    for k in ('rgb', 'ms_ssim'):
+        assert losses[k].item() == 0.0
 
 
 def test_composite_total_is_sum(pred_target):
@@ -69,10 +75,10 @@ def test_composite_temporal_included_when_prev_provided(pred_target_seq):
         'charbonnier': 1.0, 'temporal_consistency': 0.5,
     })
     losses_with = criterion(pred_cur, target_cur, pred_prev, target_prev)
-    assert 'temporal_consistency' in losses_with
+    assert losses_with['temporal_consistency'].item() > 0.0
 
     losses_without = criterion(pred_cur, target_cur)
-    assert 'temporal_consistency' not in losses_without
+    assert losses_without['temporal_consistency'].item() == 0.0
 
 
 def test_composite_gradient_flow(pred_target):
@@ -114,6 +120,7 @@ def test_composite_empty_config_defaults_to_charbonnier(pred_target):
     pred, target = pred_target
     criterion = CompositeLoss({})
     losses = criterion(pred, target)
-    assert set(losses.keys()) == {'char', 'total'}
     assert losses['total'].item() > 0.0
     assert losses['total'].item() == losses['char'].item()
+    for k in ('wavelet', 'sobel', 'fft', 'rgb', 'ms_ssim'):
+        assert losses[k].item() == 0.0

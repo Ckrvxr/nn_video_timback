@@ -57,7 +57,8 @@ def main():
     ckpt = torch.load(args.checkpoint, map_location=device)
     if 'model_state_dict' in ckpt:
         ckpt = ckpt['model_state_dict']
-    ckpt.pop('_t_state', None)
+    for key in ('_t_state', '_prev_z_out', 'prev_z_c5'):
+        ckpt.pop(key, None)
     model.load_state_dict(ckpt, strict=False)
 
     if use_half:
@@ -65,6 +66,9 @@ def main():
         for p in model.parameters():
             if p.dtype == torch.float32 and p.is_floating_point():
                 p.data = p.data.half()
+
+    # Per-channel delta scale: I=0.2, Ct=0.05, Cp=0.05
+    model.experts.delta_scale[0, [1, 2]] = 0.05
 
     input_path = Path(args.input)
     # Pre-convert to yuv444p so chroma upsampling matches training pipeline

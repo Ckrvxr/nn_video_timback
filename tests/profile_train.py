@@ -69,7 +69,7 @@ def run_profile():
                 ld['total'].backward()
             else:
                 with torch.no_grad():
-                    model(lr[:, t], ssm_only=True)
+                    model.forward_ssm_ictcp(lr[:, t])
         torch.cuda.synchronize()
 
         if step % 2 == 1:

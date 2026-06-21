@@ -4,3 +4,4 @@ from utils.training.losses.sobel import SobelLoss
 from utils.training.losses.temporal import TemporalConsistencyLoss
 from utils.training.losses.fft import FFTLoss
 from utils.training.losses.wavelet import WaveletLoss
+from utils.training.losses.ms_ssim import MSSSIMLoss

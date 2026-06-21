@@ -26,10 +26,11 @@ class MambaFixer(nn.Module):
 
         self.downsample = DownsampleChain(1, num_features)
 
-        self.t_ssm = SequenceProcessor(num_features, state_dimension)
+        self.t_ssm = SequenceProcessor(num_features * 2, state_dimension)
+        self.z_out_proj = nn.Linear(num_features * 2, num_features)
 
-        # Fusion: c2(8) + c3(16) + c4(32) + z_out(num_features) + h_t(state_dim) + prev_z_out(num_features)
-        fusion_in = 8 + 16 + 32 + num_features + state_dimension + num_features
+        # Fusion: c2(8) + c3(16) + c4(32) + z_out(num_features) + h_t(state_dim)
+        fusion_in = 8 + 16 + 32 + num_features + state_dimension
         fusion_hidden = min(128, fusion_in)
         self.fusion = nn.Sequential(
             nn.Linear(fusion_in, fusion_hidden),
@@ -44,7 +45,7 @@ class MambaFixer(nn.Module):
         self.experts = ParallelExperts(num_experts, num_features_stream, dilation_rates, in_ch=3)
 
         self.register_buffer('_t_state', torch.zeros(state_dimension))
-        self.register_buffer('_prev_z_out', torch.zeros(num_features))
+        self.register_buffer('prev_z_c5', torch.zeros(num_features))
         self._has_state = False
 
 
@@ -53,18 +54,18 @@ class MambaFixer(nn.Module):
         d = self._t_state.shape[-1]
         dev = device or self._t_state.device
         self._t_state = torch.zeros(batch_size, d, device=dev, dtype=self._t_state.dtype)
-        self._prev_z_out = torch.zeros(batch_size, self.num_features, device=dev, dtype=self._t_state.dtype)
+        self.prev_z_c5 = torch.zeros(batch_size, self.num_features, device=dev, dtype=self._t_state.dtype)
         self._has_state = True
 
     def _ensure_state(self, B: int, dev: torch.device):
         if not self._has_state:
             d = self._t_state.shape[-1]
             self._t_state = torch.zeros(B, d, device=dev, dtype=self._t_state.dtype)
-            self._prev_z_out = torch.zeros(B, self.num_features, device=dev, dtype=self._t_state.dtype)
+            self.prev_z_c5 = torch.zeros(B, self.num_features, device=dev, dtype=self._t_state.dtype)
             self._has_state = True
         elif self._t_state.shape[0] != B:
             self._t_state = self._t_state[:1].expand(B, -1).contiguous()
-            self._prev_z_out = self._prev_z_out[:1].expand(B, -1).contiguous()
+            self.prev_z_c5 = self.prev_z_c5[:1].expand(B, -1).contiguous()
 
     def forward_ssm_ictcp(self, ictcp: torch.Tensor):
         B = ictcp.shape[0]
@@ -79,19 +80,18 @@ class MambaFixer(nn.Module):
         z_c4 = c4.mean(dim=(2, 3))
         z_c5 = c5.mean(dim=(2, 3))
 
-        out_t, self._t_state = self.t_ssm(z_c5.unsqueeze(1), self._t_state)
-        z_out = out_t[:, -1, :]
+        diff = z_c5 - self.prev_z_c5.detach()
+        ssm_in = torch.cat([z_c5, diff], dim=-1).unsqueeze(1)
+        out_t, self._t_state = self.t_ssm(ssm_in, self._t_state)
+        z_out = self.z_out_proj(out_t[:, -1, :])
 
+        self.prev_z_c5 = z_out.detach()
         return z_c2, z_c3, z_c4, z_out, self._t_state
 
-    def forward(self, x: torch.Tensor, ssm_only: bool = False):
+    def forward(self, x: torch.Tensor):
         z_c2, z_c3, z_c4, z_out, h_t = self.forward_ssm_ictcp(x)
 
-        if ssm_only:
-            self._prev_z_out = z_out.detach()
-            return None
-
-        router_in = torch.cat([z_c2, z_c3, z_c4, z_out, h_t, self._prev_z_out], dim=-1)
+        router_in = torch.cat([z_c2, z_c3, z_c4, z_out, h_t], dim=-1)
         router_in = self.fusion(router_in)
 
         idx, weights, logits = self.router(router_in, x, k=self.n_active, threshold=self.routing_threshold)
@@ -101,5 +101,4 @@ class MambaFixer(nn.Module):
 
         delta = self.experts(x, idx, weights)
 
-        self._prev_z_out = z_out.detach()
         return x + delta

@@ -26,7 +26,7 @@ class DilatedHDCStream(nn.Module):
         for mod in self.convs:
             x = mod(x)
         x = self.up(x)
-        return 0.1 * torch.tanh(x)
+        return 0.2 * torch.tanh(x)
 
 
 class MergedDilatedHDCStream(nn.Module):
@@ -57,7 +57,7 @@ class MergedDilatedHDCStream(nn.Module):
         for m in self.convs:
             x = m(x)
         x = self.up(x)
-        return 0.1 * torch.tanh(x)
+        return 0.2 * torch.tanh(x)
 
 
 class ParallelExperts(nn.Module):
@@ -89,6 +89,8 @@ class ParallelExperts(nn.Module):
         self.up2_bias = nn.Parameter(torch.zeros(num_experts, G))
         self.depth_weight = nn.Parameter(torch.zeros(num_experts, G, 1, 3, 3))
         self.depth_bias = nn.Parameter(torch.zeros(num_experts, G))
+
+        self.register_buffer('delta_scale', torch.full((1, G, 1, 1), 0.2))
 
         self.reset_parameters()
 
@@ -171,4 +173,4 @@ class ParallelExperts(nn.Module):
         out_delta = x_feat.view(B, k, G, H, W)
         w_res = weights.view(B, k, 1, 1, 1)
         out = (out_delta * w_res).sum(dim=1)
-        return 0.1 * torch.tanh(out)
+        return self.delta_scale * torch.tanh(out)

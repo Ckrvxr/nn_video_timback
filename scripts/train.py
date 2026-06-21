@@ -231,6 +231,7 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     total_loss = 0.0
     n_batches = len(loader)
     n_samples = len(loader.dataset)
+    running_losses: dict[str, float] = {}
     
     training_cfg = config['training_settings']
     model_cfg = config['model_architecture']
@@ -249,7 +250,6 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     is_mamba = model_name == 'mamba_fixer'
     sequential = dataset_cfg.get('sequential_mode', False) and is_mamba
     center_idx = dataset_cfg['num_frames'] // 2
-    prev_video_id = -1
     expert_counts = torch.zeros(model_cfg.get('num_experts', 100), device='cpu')
     use_sam = training_cfg.get('enable_sam', False)
 
@@ -299,13 +299,9 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
         hr = batch['hr'].to(device, non_blocking=True)
 
         def run_forward():
-            nonlocal prev_video_id
             moe_weight = config['loss_weights'].get('moe', 0.01)
             if sequential:
-                video_id = batch.get('video_id', -1)
-                if video_id != prev_video_id:
-                    model.reset_state(lr.size(0), device)
-                prev_video_id = video_id
+                model.reset_state(lr.size(0), device)
 
                 for t in range(lr.size(1)):
                     if t == center_idx:
@@ -318,12 +314,14 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                         loss = loss_dict['total'] / grad_accum
                     else:
                         with torch.no_grad():
-                            model(lr[:, t].to(memory_format=torch.channels_last), ssm_only=True)
+                            model.forward_ssm_ictcp(lr[:, t].to(memory_format=torch.channels_last))
                 
                 if hasattr(model, '_last_expert_idx'):
                     idx_flat = model._last_expert_idx.cpu().flatten()
-                    expert_counts.index_add_(0, idx_flat,
-                                             torch.ones_like(idx_flat, dtype=torch.float))
+                    valid = idx_flat >= 0
+                    if valid.any():
+                        expert_counts.index_add_(0, idx_flat[valid],
+                                                 torch.ones_like(idx_flat[valid], dtype=torch.float))
                 model._t_state = model._t_state.detach()
                 
             else:
@@ -337,8 +335,10 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                 loss = loss_dict['total'] / grad_accum
                 if hasattr(model, '_last_expert_idx'):
                     idx_flat = model._last_expert_idx.cpu().flatten()
-                    expert_counts.index_add_(0, idx_flat,
-                                             torch.ones_like(idx_flat, dtype=torch.float))
+                    valid = idx_flat >= 0
+                    if valid.any():
+                        expert_counts.index_add_(0, idx_flat[valid],
+                                                 torch.ones_like(idx_flat[valid], dtype=torch.float))
             return loss, loss_dict
 
         # Save initial Mamba state for the second pass of SAM
@@ -448,6 +448,8 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
 
         batch_loss = loss_dict['total'].item()
         total_loss += batch_loss
+        for k, v in loss_dict.items():
+            running_losses[k] = running_losses.get(k, 0.0) + v.item()
 
         # Print detailed Expert Leaderboard and Loss Breakdown every log_interval batches
         if (batch_idx + 1) % log_interval == 0:
@@ -509,11 +511,15 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
 
         samples_sec = bs / batch_time if batch_time > 0 else 0
         
-        pbar.set_postfix(
-            loss=f"{batch_loss:.6f}",
-            **{n: f"{v.item():.6f}" for n, v in loss_dict.items() if n != 'total'},
-            lr=f"{optimizer.param_groups[0]['lr']:.2e}",
-        )
+        _postfix_order = ['ms_ssim', 'wavelet', 'fft', 'sobel', 'rgb', 'char', 'moe']
+        count = batch_idx + 1
+        _postfix_parts = [f"loss={running_losses['total'] / count:.6f}"]
+        for name in _postfix_order:
+            val = running_losses.get(name)
+            if val is not None:
+                _postfix_parts.append(f"{name}={val / count:.6f}")
+        _postfix_parts.append(f"lr={optimizer.param_groups[0]['lr']:.2e}")
+        pbar.set_postfix_str("  ".join(_postfix_parts))
         pbar.update(bs)
 
         if device.type == 'cuda' and (batch_idx + 1) % cuda_cache_interval == 0:
@@ -635,13 +641,18 @@ def main():
             console.warning('Falling back to uncompiled model')
 
     sub_section("Training")
+    # ── Normalize loss_weights: list-of-schedule → dict + inline schedule ──
+    if isinstance(config['loss_weights'], list):
+        config['weights_schedule'] = config['loss_weights']
+        config['loss_weights'] = config['weights_schedule'][-1]['weights'].copy()
+    else:
+        metric("Loss Weights", str(config['loss_weights']))
     metric("Batch Size", str(training_cfg['batch_size']))
     metric("Grad Accum", str(training_cfg.get('gradient_accumulation_steps', 1)))
     metric("Learning Rate", f"{training_cfg['learning_rate']:.2e}")
     metric("Epochs", str(training_cfg['num_epochs']))
     metric("Mixed Precision", str(training_cfg.get('use_mixed_precision', False)))
     metric("SAM", str(training_cfg.get('enable_sam', False)))
-    metric("Loss Weights", str(config['loss_weights']))
     metric("MoE Weight", str(config['loss_weights'].get('moe', 0.01)))
 
     criterion = CompositeLoss(config['loss_weights'], device=device)
@@ -760,8 +771,33 @@ def main():
         console.info("  No validation sets configured, skipping baseline.")
         divider()
 
+    # ── Per-epoch weights schedule helper ───────────────────────
+    def _get_epoch_weights(epoch_idx: int, schedule: list, fallback: dict) -> dict | None:
+        if not schedule:
+            return None
+        ep = epoch_idx + 1
+        for entry in schedule:
+            spec = entry['epoch']
+            if isinstance(spec, int) and spec == ep:
+                return entry['weights']
+            if isinstance(spec, str):
+                if spec.endswith('+') and ep >= int(spec[:-1]):
+                    return entry['weights']
+                if '-' in spec:
+                    lo, hi = map(int, spec.split('-'))
+                    if lo <= ep <= hi:
+                        return entry['weights']
+        return None
+
     try:
         for epoch in range(start_epoch, n_epochs):
+            # Apply warmup weights if configured for this epoch
+            wu_weights = _get_epoch_weights(epoch, config.get('weights_schedule', []), config['loss_weights'])
+            if wu_weights is not None:
+                merged = dict(config['loss_weights'])
+                merged.update(wu_weights)
+                criterion.update_weights(merged)
+                console.info(f"Epoch {epoch+1} weights: {', '.join(f'{k}={v}' for k, v in wu_weights.items() if k != 'moe')}")
             if run_dir:
                 pause_file = run_dir / '.pause'
                 exit_file = run_dir / '.exit'
@@ -817,23 +853,34 @@ def main():
                         model, loader, device,
                         num_vmaf_samples=logging_cfg.get('num_vmaf_samples', 0))
                     vmaf_str = f'  vmaf={vmaf:.4f}' if vmaf > 0 else ''
-                    # Color-code PSNR
-                    if psnr >= 35:
-                        psnr_color = "green"
-                    elif psnr >= 30:
-                        psnr_color = "yellow"
+                    # Color-code VMAF
+                    if vmaf >= 80:
+                        vmaf_color = "green"
+                    elif vmaf >= 60:
+                        vmaf_color = "yellow"
                     else:
-                        psnr_color = "red"
-                    # Baseline delta (plain text; color tags in substitutions won't render)
+                        vmaf_color = "red"
                     bl = baseline.get(name, {})
-                    delta_str = ""
+                    psnr_delta = ""
+                    ssim_delta = ""
+                    vmaf_delta = ""
                     if bl:
                         d = psnr - bl['psnr']
-                        sign = "+" if d >= 0 else ""
-                        delta_str = f"  Δ{sign}{d:.2f} vs baseline"
+                        psnr_delta = f" ({'+' if d >= 0 else ''}{d:.2f})"
+                        if 'ssim' in bl:
+                            d = ssim - bl['ssim']
+                            ssim_delta = f" ({'+' if d >= 0 else ''}{d:.4f})"
+                        if 'vmaf' in bl and vmaf > 0:
+                            d = vmaf - bl['vmaf']
+                            vmaf_delta = f" ({'+' if d >= 0 else ''}{d:.2f})"
+                    color_msg = (
+                        f"  <white>{{}}</white>"
+                        f"  <dim>psnr={{:.2f}}{psnr_delta}  ssim={{:.4f}}{ssim_delta}</dim>"
+                    )
+                    if vmaf > 0:
+                        color_msg += f"  <{vmaf_color}>vmaf={{:.2f}}{vmaf_delta}</{vmaf_color}>"
                     console.opt(colors=True).info(
-                        "  <white>{}</white>  <{}>psnr={:.2f}</{}>  ssim={:.4f}{}{}",
-                        name, psnr_color, psnr, psnr_color, ssim, vmaf_str, delta_str,
+                        color_msg, name, psnr, ssim, vmaf,
                     )
                 divider()
 
