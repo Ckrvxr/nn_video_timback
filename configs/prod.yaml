@@ -57,8 +57,9 @@ training_settings:
   enable_sam: false
   sam_rho: 0.05
 
-loss_weights:
+schedule:
   - epoch: 1
+    lr: 2.0e-4
     weights:
       ms_ssim: 0.0
       wavelet: 0.0
@@ -68,6 +69,7 @@ loss_weights:
       charbonnier: 1.0
       moe: 0.01
   - epoch: 2+
+    lr: follow_training_settings
     weights:
       ms_ssim: 1.0
       wavelet: 0.2

@@ -438,12 +438,23 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
                 # Standard optimization step
                 if scaler is not None:
                     scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
-                    scaler.step(optimizer)
-                    scaler.update()
+                    has_nan = any(torch.isnan(p.grad).any() or torch.isinf(p.grad).any()
+                                  for p in model.parameters() if p.grad is not None)
+                    if has_nan:
+                        optimizer.zero_grad(set_to_none=True)
+                        scaler.update()
+                    else:
+                        nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                        scaler.step(optimizer)
+                        scaler.update()
                 else:
-                    nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
-                    optimizer.step()
+                    has_nan = any(torch.isnan(p.grad).any() or torch.isinf(p.grad).any()
+                                  for p in model.parameters() if p.grad is not None)
+                    if has_nan:
+                        optimizer.zero_grad(set_to_none=True)
+                    else:
+                        nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                        optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
         batch_loss = loss_dict['total'].item()
@@ -642,9 +653,8 @@ def main():
 
     sub_section("Training")
     # ── Normalize loss_weights: list-of-schedule → dict + inline schedule ──
-    if isinstance(config['loss_weights'], list):
-        config['weights_schedule'] = config['loss_weights']
-        config['loss_weights'] = config['weights_schedule'][-1]['weights'].copy()
+    if 'schedule' in config:
+        config['loss_weights'] = config['schedule'][-1]['weights'].copy()
     else:
         metric("Loss Weights", str(config['loss_weights']))
     metric("Batch Size", str(training_cfg['batch_size']))
@@ -778,25 +788,33 @@ def main():
         ep = epoch_idx + 1
         for entry in schedule:
             spec = entry['epoch']
-            if isinstance(spec, int) and spec == ep:
-                return entry['weights']
+            match = (isinstance(spec, int) and spec == ep)
             if isinstance(spec, str):
                 if spec.endswith('+') and ep >= int(spec[:-1]):
-                    return entry['weights']
-                if '-' in spec:
+                    match = True
+                elif '-' in spec:
                     lo, hi = map(int, spec.split('-'))
                     if lo <= ep <= hi:
-                        return entry['weights']
+                        match = True
+            if match:
+                result = dict(entry['weights'])
+                if 'lr' in entry:
+                    result['lr'] = entry['lr']
+                return result
         return None
 
     try:
         for epoch in range(start_epoch, n_epochs):
             # Apply warmup weights if configured for this epoch
-            wu_weights = _get_epoch_weights(epoch, config.get('weights_schedule', []), config['loss_weights'])
+            wu_weights = _get_epoch_weights(epoch, config.get('schedule', []), config['loss_weights'])
             if wu_weights is not None:
                 merged = dict(config['loss_weights'])
                 merged.update(wu_weights)
                 criterion.update_weights(merged)
+                epoch_lr = wu_weights.get('lr')
+                if epoch_lr is not None and epoch_lr != 'follow_training_settings':
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = epoch_lr
                 console.info(f"Epoch {epoch+1} weights: {', '.join(f'{k}={v}' for k, v in wu_weights.items() if k != 'moe')}")
             if run_dir:
                 pause_file = run_dir / '.pause'
