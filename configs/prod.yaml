@@ -45,21 +45,22 @@ model_architecture:
 training_settings:
   batch_size: 11
   num_epochs: 100
-  learning_rate: 5.0e-5
-  min_learning_rate: 1.0e-6
+  lr:
+    warmup_peak: 2.0e-4
+    warmup_epochs: 1
+    true_peak: 5.0e-5
+    min: 1.0e-6
   weight_decay: 1.0e-4
   adam_beta1: 0.9
   adam_beta2: 0.99
+  gradient_accumulation_steps: 10
   gradient_clipping_threshold: 1.0
-  use_mixed_precision: true
-  gradient_accumulation_steps: 1
-  enable_torch_compile: false
   enable_sam: false
   sam_rho: 0.05
-
+  use_mixed_precision: true
+  enable_torch_compile: false
 schedule:
   - epoch: 1
-    lr: 2.0e-4
     weights:
       ms_ssim: 0.0
       wavelet: 0.0
@@ -68,17 +69,27 @@ schedule:
       rgb: 0.5
       charbonnier: 1.0
       moe: 0.01
-  - epoch: 2+
-    lr: follow_training_settings
+  - epoch: 2-3
+    weights:
+      ms_ssim: 0.0
+      wavelet: 5.0
+      fft: 1.0
+      sobel: 0.5
+      rgb: 0.10
+      charbonnier: 0.05
+      temporal_consistency: 0.0
+      moe: 0.01
+  - epoch: 4+
     weights:
       ms_ssim: 1.0
-      wavelet: 0.2
-      fft: 0.2
+      wavelet: 0.5
+      fft: 0.3
       sobel: 0.15
       rgb: 0.10
       charbonnier: 0.05
       temporal_consistency: 0.0
       moe: 0.01
+
 
 logging_settings:
   log_interval: 1000

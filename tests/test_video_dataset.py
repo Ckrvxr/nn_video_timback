@@ -42,7 +42,7 @@ def test_model_forward_shape(device):
 def test_loss_backward(device):
     model = MambaFixer(64, 32, 2, 4, 2, [1, 2, 4]).to(device)
     x = torch.randn((4, 3, 512, 512), device=device, requires_grad=True)
-    criterion = CompositeLoss({'charbonnier': 1.0, 'wavelet': 0.5}, device=device)
+    criterion = CompositeLoss({'charbonnier': 1.0, 'wavelet': 0.5})
     loss_dict = criterion(x, x)
     loss_dict['total'].backward()
     assert x.grad is not None

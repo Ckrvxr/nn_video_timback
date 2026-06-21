@@ -11,30 +11,6 @@ except ImportError:
 from .fast_ssm import FastSSM
 
 
-class SimpleSSM(nn.Module):
-    def __init__(self, d_model: int = 16, d_state: int = 16):
-        super().__init__()
-        self.d_model = d_model
-        self.d_state = d_state
-        self.fc = nn.Linear(d_model + d_state, d_model)
-        self.state_proj = nn.Linear(d_model, d_state)
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, x: torch.Tensor, state: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        B, L, D = x.shape
-        if state is None:
-            state = x.new_zeros(B, self.d_state)
-        out = []
-        for t in range(L):
-            inp = torch.cat([x[:, t], state], dim=-1)
-            h = self.fc(inp)
-            out.append(h)
-            state = self.state_proj(h)
-        out = torch.stack(out, dim=1)
-        out = self.norm(out)
-        return out, state
-
-
 class SSMBlock(nn.Module):
     def __init__(self, d_model: int = 16, d_state: int = 16):
         super().__init__()

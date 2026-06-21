@@ -2,64 +2,6 @@ import torch
 import torch.nn as nn
 
 
-class DilatedHDCStream(nn.Module):
-    def __init__(self, nf: int = 4, dilations: list[int] | None = None):
-        super().__init__()
-        if dilations is None:
-            dilations = [1, 2, 4, 8]
-        self.down = nn.Conv2d(1, nf, 3, 2, 1)
-
-        convs = []
-        for d in dilations:
-            convs.append(nn.Conv2d(nf, nf, 3, 1, d, dilation=d))
-            convs.append(nn.PReLU(nf))
-        self.convs = nn.ModuleList(convs)
-
-        self.up = nn.Sequential(
-            nn.Conv2d(nf, nf * 4, 3, 1, 1),
-            nn.PixelShuffle(2),
-            nn.Conv2d(nf, 1, 3, 1, 1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.down(x)
-        for mod in self.convs:
-            x = mod(x)
-        x = self.up(x)
-        return 0.2 * torch.tanh(x)
-
-
-class MergedDilatedHDCStream(nn.Module):
-    def __init__(self, num_experts: int, nf: int = 2,
-                 dilations: list[int] | None = None):
-        super().__init__()
-        G = num_experts
-        if dilations is None:
-            dilations = [1, 2, 4, 32]
-        self.down = nn.Conv2d(G, nf * G, 3, 2, 1, groups=G)
-
-        convs = []
-        for d in dilations:
-            convs.append(nn.Conv2d(nf * G, nf * G, 3, 1, d, dilation=d, groups=G))
-            convs.append(nn.PReLU(nf * G))
-        self.convs = nn.ModuleList(convs)
-
-        self.up = nn.Sequential(
-            nn.Conv2d(nf * G, nf * G * 4, 3, 1, 1, groups=G),
-            nn.PixelShuffle(2),
-            nn.Conv2d(nf * G, G, 3, 1, 1, groups=G),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, _, H, W = x.shape
-        x = x.repeat_interleave(self.convs[0].groups, dim=1)
-        x = self.down(x)
-        for m in self.convs:
-            x = m(x)
-        x = self.up(x)
-        return 0.2 * torch.tanh(x)
-
-
 class ParallelExperts(nn.Module):
     def __init__(self, num_experts: int, nf: int = 4, dilations: list[int] | None = None, in_ch: int = 1):
         super().__init__()

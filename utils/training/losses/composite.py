@@ -11,7 +11,7 @@ from utils.training.losses.ms_ssim import MSSSIMLoss
 
 
 class CompositeLoss(nn.Module):
-    def __init__(self, config: dict, device: torch.device = None):
+    def __init__(self, config: dict):
         super().__init__()
         self.w_char = config.get('charbonnier', 1.0)
         self.w_wavelet = config.get('wavelet', 0.0)

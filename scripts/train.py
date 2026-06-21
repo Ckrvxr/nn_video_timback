@@ -93,6 +93,7 @@ warnings.filterwarnings('ignore', message='Detected call of `lr_scheduler.step\\
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from utils.training.lr_scheduler import WarmupCosineLR
 from yaml import safe_load
 from tqdm import tqdm
 
@@ -622,9 +623,7 @@ def main():
 
     section("Training Setup")
 
-    if model_name == 'hyper_fixer':
-        pass
-    elif model_name == 'mamba_fixer':
+    if model_name == 'mamba_fixer':
         model = MambaFixer(
             num_features=model_cfg.get('num_features', 16),
             state_dimension=model_cfg.get('state_dimension', 32),
@@ -659,13 +658,20 @@ def main():
         metric("Loss Weights", str(config['loss_weights']))
     metric("Batch Size", str(training_cfg['batch_size']))
     metric("Grad Accum", str(training_cfg.get('gradient_accumulation_steps', 1)))
-    metric("Learning Rate", f"{training_cfg['learning_rate']:.2e}")
+    lr_cfg = training_cfg.get('lr')
+    if lr_cfg:
+        metric("LR Config", f"peak={lr_cfg['warmup_peak']:.2e}→true={lr_cfg['true_peak']:.2e}  min={lr_cfg['min']:.2e}  warmup={lr_cfg['warmup_epochs']}ep")
+    else:
+        metric("Learning Rate", f"{training_cfg['learning_rate']:.2e}")
     metric("Epochs", str(training_cfg['num_epochs']))
     metric("Mixed Precision", str(training_cfg.get('use_mixed_precision', False)))
     metric("SAM", str(training_cfg.get('enable_sam', False)))
     metric("MoE Weight", str(config['loss_weights'].get('moe', 0.01)))
 
-    criterion = CompositeLoss(config['loss_weights'], device=device)
+    criterion = CompositeLoss(config['loss_weights'])
+
+    lr_cfg = training_cfg.get('lr')
+    opt_lr = lr_cfg['warmup_peak'] if lr_cfg else training_cfg['learning_rate']
 
     use_sam = training_cfg.get('enable_sam', False)
     if use_sam:
@@ -673,7 +679,7 @@ def main():
             model.parameters(),
             base_optimizer=optim.AdamW,
             rho=training_cfg.get('sam_rho', 0.05),
-            lr=training_cfg['learning_rate'],
+            lr=opt_lr,
             weight_decay=training_cfg['weight_decay'],
             betas=(training_cfg['adam_beta1'], training_cfg['adam_beta2']),
             fused=device.type == 'cuda',
@@ -681,14 +687,26 @@ def main():
     else:
         optimizer = optim.AdamW(
             model.parameters(),
-            lr=training_cfg['learning_rate'],
+            lr=opt_lr,
             weight_decay=training_cfg['weight_decay'],
             betas=(training_cfg['adam_beta1'], training_cfg['adam_beta2']),
             fused=device.type == 'cuda',
         )
 
     n_epochs = training_cfg['num_epochs']
-    scheduler = CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=training_cfg['min_learning_rate'])
+    if lr_cfg:
+        scheduler = WarmupCosineLR(
+            optimizer,
+            warmup_peak=lr_cfg['warmup_peak'],
+            true_peak=lr_cfg['true_peak'],
+            min_lr=lr_cfg['min'],
+            warmup_epochs=lr_cfg['warmup_epochs'],
+            n_epochs=n_epochs,
+        )
+    else:
+        scheduler = CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=training_cfg['min_learning_rate'])
+
+    console.info(f"[debug] scheduler._last_lr={scheduler.get_last_lr()}  optimizer lr={optimizer.param_groups[0]['lr']:.2e}")
     scaler = torch.amp.GradScaler('cuda') if training_cfg.get('use_mixed_precision', False) and device.type == 'cuda' else None
 
     start_epoch = 0
@@ -698,6 +716,8 @@ def main():
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         if ckpt.get('scheduler_state_dict'):
             scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        for pg, lr_val in zip(optimizer.param_groups, scheduler.get_last_lr()):
+            pg['lr'] = lr_val
         start_epoch = ckpt['epoch'] + 1
     elif args.pretrained:
         ckpt = torch.load(args.pretrained, map_location=device)
@@ -797,10 +817,7 @@ def main():
                     if lo <= ep <= hi:
                         match = True
             if match:
-                result = dict(entry['weights'])
-                if 'lr' in entry:
-                    result['lr'] = entry['lr']
-                return result
+                return dict(entry['weights'])
         return None
 
     try:
@@ -811,10 +828,6 @@ def main():
                 merged = dict(config['loss_weights'])
                 merged.update(wu_weights)
                 criterion.update_weights(merged)
-                epoch_lr = wu_weights.get('lr')
-                if epoch_lr is not None and epoch_lr != 'follow_training_settings':
-                    for pg in optimizer.param_groups:
-                        pg['lr'] = epoch_lr
                 console.info(f"Epoch {epoch+1} weights: {', '.join(f'{k}={v}' for k, v in wu_weights.items() if k != 'moe')}")
             if run_dir:
                 pause_file = run_dir / '.pause'
