@@ -1,5 +1,6 @@
 import json
 import random
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +12,8 @@ from .video_loader import probe_frame_count, probe_resolution, load_video_frame_
 from .frame_cache import LazyFrameRange
 
 
-def _yuv_to_ictcp(yuv_batch: np.ndarray) -> np.ndarray:
-    """YUV [B, H, W, 3] uint8/uint16 → ICtCp [B, H, W, 3] float16 via CUDA."""
+def _yuv_to_ictcp(yuv_batch: np.ndarray) -> torch.Tensor:
+    """YUV [B, H, W, 3] uint8/uint16 → ICtCp [B, 3, H, W] float16 on CUDA."""
     import torch
     B, H, W, _ = yuv_batch.shape
     bits = 8
@@ -30,9 +31,45 @@ def _yuv_to_ictcp(yuv_batch: np.ndarray) -> np.ndarray:
 
     from utils.color_space import yuv_to_ictcp
     with torch.no_grad():
-        ictcp = yuv_to_ictcp(t)
-    return ictcp.permute(0, 2, 3, 1).cpu().numpy().astype(np.float16)
+        return yuv_to_ictcp(t).half()
 
+
+def batch_yuv_to_ictcp(yuv: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """CPU YUV tensor → GPU ICtCp float16.
+
+    Input shapes supported:
+        [B, H, W, 3]        — single frame per sample
+        [B, F, H, W, 3]     — multiple frames per sample
+
+    Returns:
+        [B, 3, H, W] or [B, F, 3, H, W] float16 on *device*.
+    """
+    orig_ndim = yuv.ndim
+    if orig_ndim == 5:
+        orig_B, F, H, W, C = yuv.shape
+        yuv = yuv.flatten(0, 1)
+
+    _, H, W, C = yuv.shape
+    bits = 8
+    if yuv.dtype == torch.uint16:
+        max_val = int(yuv.to(torch.int32).max().item())
+        bits = 12 if max_val > 1023 else 10
+    peak = float((1 << bits) - 1)
+    center = float(1 << (bits - 1))
+
+    yuv = yuv.to(device=device, dtype=torch.float32, non_blocking=True)
+    yuv = yuv.permute(0, 3, 1, 2).contiguous()
+    yuv[:, 0:1] = yuv[:, 0:1] / peak * 255.0
+    yuv[:, 1:] = (yuv[:, 1:] - center) / peak * 255.0 + 128.0
+    yuv = yuv / 127.5 - 1.0
+
+    from utils.color_space import yuv_to_ictcp
+    with torch.no_grad():
+        ictcp = yuv_to_ictcp(yuv).half()
+
+    if orig_ndim == 5:
+        ictcp = ictcp.view(orig_B, F, 3, H, W)
+    return ictcp
 
 class CompressedVideoDataset(Dataset):
     def __init__(
@@ -244,9 +281,9 @@ class CompressedVideoDataset(Dataset):
         all_ictcp = _yuv_to_ictcp(all_yuv)
 
         n_temporal = self.frames
-        lr_t = torch.from_numpy(all_ictcp[:n_temporal]).float().permute(0, 3, 1, 2)
-        hr_t = torch.from_numpy(all_ictcp[n_temporal]).float().permute(2, 0, 1)
-        hr_prev_t = torch.from_numpy(all_ictcp[n_temporal + 1]).float().permute(2, 0, 1)
+        lr_t = all_ictcp[:n_temporal].float()
+        hr_t = all_ictcp[n_temporal].float()
+        hr_prev_t = all_ictcp[n_temporal + 1].float()
 
         out = {'lr_frames': lr_t, 'hr': hr_t, 'hr_prev': hr_prev_t}
         if video_id is not None:
@@ -320,9 +357,9 @@ class CleanVideoDataset(CompressedVideoDataset):
         all_ictcp = _yuv_to_ictcp(all_yuv)
 
         n_temporal = self.frames
-        lr_t = torch.from_numpy(all_ictcp[:n_temporal]).float().permute(0, 3, 1, 2)
-        hr_t = torch.from_numpy(all_ictcp[0]).float().permute(2, 0, 1)
-        hr_prev_t = torch.from_numpy(all_ictcp[n_temporal]).float().permute(2, 0, 1)
+        lr_t = all_ictcp[:n_temporal].float()
+        hr_t = all_ictcp[0].float()
+        hr_prev_t = all_ictcp[n_temporal].float()
 
         out = {'lr_frames': lr_t, 'hr': hr_t, 'hr_prev': hr_prev_t}
         if video_id is not None:
@@ -347,7 +384,6 @@ class PreprocessedVideoDataset(Dataset):
     def __init__(self, data_root: str, frames: int = 9):
         self.data_root = Path(data_root)
         self.frames = frames
-        self.half = frames // 2
 
         self.samples: list[dict] = []
         for seg_dir in sorted(self.data_root.iterdir()):
@@ -360,12 +396,12 @@ class PreprocessedVideoDataset(Dataset):
                 meta = json.load(f)
             total = meta['num_frames']
             vid = hash(str(seg_dir)) & 0x7FFFFFFF
-            for c in range(self.half, total - self.half):
+            for window_start in range(0, total - self.frames + 1):
                 self.samples.append({
                     'seg_dir': str(seg_dir),
                     'lr_path': str(lr_path),
                     'hr_path': str(hr_path),
-                    'center': c,
+                    'window_start': window_start,
                     'video_id': vid,
                 })
 
@@ -382,18 +418,18 @@ class PreprocessedVideoDataset(Dataset):
 
         lr_all = _load(s['lr_path'])
         hr_all = _load(s['hr_path'])
-        lo = s['center'] - self.half
-        hi = s['center'] + self.half + 1
-        lr_win = torch.from_numpy(lr_all[lo:hi].copy()).float()
-        hr_f = torch.from_numpy(hr_all[s['center']].copy()).float()
+        window_start = s['window_start']
+        window_end = window_start + self.frames
+        lr_win = torch.from_numpy(lr_all[window_start:window_end].copy()).float()
+        hr_f = torch.from_numpy(hr_all[window_end - 1].copy()).float()
         return {'lr_frames': lr_win, 'hr': hr_f, 'video_id': s['video_id']}
 
 
 class RawVideoDataset(Dataset):
-    """Real-time CPU-decoded dataset for generate_dataset output structure.
+    """Real-time CPU-decoded dataset.  Returns raw YUV numpy arrays
+    (no GPU ICtCp — that is done by the training loop after collation).
 
-    Reads HR.mkv/LR.mkv directly (no .npy cache).  Uses LazyFrameRange for
-    on-demand decoding with sliding-window cache.
+    Uses LazyFrameRange per segment (sliding-window decode cache).
 
     Directory layout per segment::
 
@@ -401,15 +437,13 @@ class RawVideoDataset(Dataset):
             HR.mkv       (FFV1, yuv444p12le, 512×512)
             LR.mkv       (FFV1, yuv420p*, 512×512)
             meta.json    (contains num_frames)
-
-    Matches the output of generate_dataset.py.
     """
-    def __init__(self, data_root: str, frames: int = 9):
+    def __init__(self, data_root: str, frames: int = 9, max_cached_segments: int = 64):
         self.data_root = Path(data_root)
         self.frames = frames
-        self.half = frames // 2
-        self._hr_ranges: dict[str, LazyFrameRange] = {}
-        self._lr_ranges: dict[str, LazyFrameRange] = {}
+        self._max_cached = max_cached_segments
+        self._hr_ranges: OrderedDict[str, LazyFrameRange] = OrderedDict()
+        self._lr_ranges: OrderedDict[str, LazyFrameRange] = OrderedDict()
 
         self.samples: list[dict] = []
         for seg_dir in sorted(self.data_root.iterdir()):
@@ -423,13 +457,13 @@ class RawVideoDataset(Dataset):
             total = meta['num_frames']
             vid = hash(str(seg_dir)) & 0x7FFFFFFF
             seg_key = str(seg_dir)
-            for c in range(self.half, total - self.half):
+            for window_start in range(0, total - self.frames + 1):
                 self.samples.append({
                     'seg_key': seg_key,
                     'hr_path': str(hr_path),
                     'lr_path': str(lr_path),
                     'n_frames': total,
-                    'center': c,
+                    'window_start': window_start,
                     'video_id': vid,
                 })
 
@@ -441,22 +475,57 @@ class RawVideoDataset(Dataset):
         key = s['seg_key']
 
         if key not in self._hr_ranges:
-            self._hr_ranges[key] = LazyFrameRange(s['hr_path'], s['n_frames'], window_size=self.frames)
-            self._lr_ranges[key] = LazyFrameRange(s['lr_path'], s['n_frames'], window_size=self.frames)
+            if len(self._hr_ranges) >= self._max_cached:
+                evict_key, evict_hr = self._hr_ranges.popitem(last=False)
+                evict_lr = self._lr_ranges.pop(evict_key)
+                evict_hr.clear()
+                evict_lr.clear()
+            self._hr_ranges[key] = LazyFrameRange(s['hr_path'], s['n_frames'],
+                                                  window_size=self.frames)
+            self._lr_ranges[key] = LazyFrameRange(s['lr_path'], s['n_frames'],
+                                                  window_size=self.frames)
+        else:
+            self._hr_ranges.move_to_end(key)
+            self._lr_ranges.move_to_end(key)
 
-        c = s['center']
-        lo = c - self.half
-        hi = c + self.half + 1
+        window_start = s['window_start']
+        window_end = window_start + self.frames
 
-        lr_yuvs = [self._lr_ranges[key][i] for i in range(lo, hi)]
-        hr_yuv = self._hr_ranges[key][c]
+        lr_yuvs = np.stack([self._lr_ranges[key][frame_index] for frame_index in range(window_start, window_end)], axis=0)
+        hr_yuv = self._hr_ranges[key][window_end - 1]
+        return {'lr_frames': lr_yuvs, 'hr': hr_yuv, 'video_id': s['video_id']}
 
-        all_yuv = np.stack(lr_yuvs + [hr_yuv], axis=0)
-        all_ictcp = _yuv_to_ictcp(all_yuv)
 
-        lr_t = torch.from_numpy(all_ictcp[:self.frames]).float().permute(0, 3, 1, 2)
-        hr_t = torch.from_numpy(all_ictcp[self.frames]).float().permute(2, 0, 1)
-        return {'lr_frames': lr_t, 'hr': hr_t, 'video_id': s['video_id']}
+class MirrorDataset(Dataset):
+    """Wrap a Dataset, horizontally flipping frames when index < 0.
+
+    Used by PreprocessedBatchSampler with segment_repeat >= 2 to mirror
+    alternate passes at zero extra decode cost.
+
+    Handles both torch.Tensor (CHW) and np.ndarray (HWC) formats.
+    """
+    def __init__(self, wrapped: Dataset):
+        self.wrapped = wrapped
+
+    @staticmethod
+    def _flip_horizontal(x):
+        if isinstance(x, torch.Tensor):
+            # [..., 3, H, W] — flip W dim
+            return torch.flip(x, dims=[-1])
+        # [..., H, W, 3] — flip W dim
+        return np.flip(x, axis=-2)
+
+    def __getitem__(self, idx: int) -> dict:
+        mirror = idx < 0
+        real_idx = -idx - 1 if mirror else idx
+        sample = self.wrapped[real_idx]
+        if mirror:
+            sample['lr_frames'] = self._flip_horizontal(sample['lr_frames'])
+            sample['hr'] = self._flip_horizontal(sample['hr'])
+        return sample
+
+    def __len__(self) -> int:
+        return len(self.wrapped)
 
 
 class PreprocessedBatchSampler(BatchSampler):
@@ -467,11 +536,13 @@ class PreprocessedBatchSampler(BatchSampler):
     one segment, then moves to the next segment.  Segment order is
     shuffled; within a segment the frame order is monotonic.
     """
-    def __init__(self, dataset: Dataset, batch_size: int):
+    def __init__(self, dataset: Dataset, batch_size: int, segment_repeat: int = 1):
         self.dataset = dataset
         self.batch_size = batch_size
+        self.segment_repeat = segment_repeat
+        self._groups: dict[int, list[int]] | None = None
 
-    def __iter__(self):
+    def _build_groups(self) -> dict[int, list[int]]:
         from collections import defaultdict
         groups: dict[int, list[int]] = defaultdict(list)
         if hasattr(self.dataset, 'datasets'):  # ConcatDataset
@@ -486,18 +557,34 @@ class PreprocessedBatchSampler(BatchSampler):
         else:
             for i, s in enumerate(self.dataset.samples):
                 groups[s['video_id']].append(i)
+        return groups
+
+    def __iter__(self):
+        if self._groups is None:
+            self._groups = self._build_groups()
+        groups = self._groups
+        self._groups = None  # free groups after building batch list
 
         group_batches = []
         for indices in groups.values():
-            for start in range(0, len(indices), self.batch_size):
-                chunk = indices[start:start + self.batch_size]
-                group_batches.append(chunk)
+            chunk_batches = [indices[i:i + self.batch_size] for i in range(0, len(indices), self.batch_size)]
+            for rep in range(self.segment_repeat):
+                source = chunk_batches
+                if rep % 2:
+                    source = [[-i-1 for i in c] for c in reversed(chunk_batches)]
+                group_batches.extend(source)
 
         random.shuffle(group_batches)
         yield from group_batches
 
     def __len__(self) -> int:
-        return max(1, len(self.dataset) // self.batch_size)
+        if self._groups is None:
+            self._groups = self._build_groups()
+        total_chunks = sum(
+            (len(indices) + self.batch_size - 1) // self.batch_size
+            for indices in self._groups.values()
+        )
+        return max(1, total_chunks) * self.segment_repeat
 
 
 class VideoBatchSampler(BatchSampler):
@@ -660,6 +747,28 @@ def collate_video(batch: list[dict]) -> dict[str, Any]:
     return out
 
 
+def collate_raw(batch: list[dict]) -> dict[str, Any]:
+    """Collate for RawVideoDataset: stacks numpy YUV frames → CPU tensors."""
+    B = len(batch)
+    lr_shape = batch[0]['lr_frames'].shape
+    hr_shape = batch[0]['hr'].shape
+    lr_dtype = batch[0]['lr_frames'].dtype
+    hr_dtype = batch[0]['hr'].dtype
+
+    lr_out = np.empty((B, *lr_shape), dtype=lr_dtype)
+    hr_out = np.empty((B, *hr_shape), dtype=hr_dtype)
+
+    for i, item in enumerate(batch):
+        lr_out[i] = item['lr_frames']
+        hr_out[i] = item['hr']
+
+    out = {'lr_frames': torch.from_numpy(lr_out), 'hr': torch.from_numpy(hr_out)}
+    video_id = batch[0].get('video_id')
+    if video_id is not None:
+        out['video_id'] = video_id
+    return out
+
+
 def create_dataloader(
     datasets: list[str],
     batch_size: int = 16,
@@ -671,17 +780,22 @@ def create_dataloader(
     prefetch_factor: int | None = None,
     shuffle_variants: bool = False,
     clip_repeat: int = 1,
+    segment_repeat: int = 1,
     sequential: bool = False,
     persistent_workers: bool | None = None,
     patch_buffer: int = 0,
     shuffle: bool | None = None,
+    max_cached_segments: int = 64,
 ) -> DataLoader:
     if data_type in ('cache', 'raw'):
-        from functools import partial
         cls = PreprocessedVideoDataset if data_type == 'cache' else RawVideoDataset
-        ds_list = [cls(d, frames=frames) for d in datasets]
+        collate = collate_video if data_type == 'cache' else collate_raw
+        ds_list = [cls(d, frames=frames, max_cached_segments=max_cached_segments) for d in datasets]
+        if prefetch_factor is None:
+            prefetch_factor = 1 if workers > 0 else None
         from torch.utils.data import ConcatDataset
         dataset = ConcatDataset(ds_list) if len(ds_list) > 1 else ds_list[0]
+        train_dataset = MirrorDataset(dataset) if is_train else dataset
 
         kwargs = {
             'num_workers': workers,
@@ -690,11 +804,11 @@ def create_dataloader(
             'prefetch_factor': prefetch_factor if (prefetch_factor is not None and workers > 0) else None,
         }
         if is_train:
-            sampler = PreprocessedBatchSampler(dataset, batch_size)
-            return DataLoader(dataset, batch_sampler=sampler, collate_fn=collate_video, **kwargs)
+            sampler = PreprocessedBatchSampler(dataset, batch_size, segment_repeat=segment_repeat)
+            return DataLoader(train_dataset, batch_sampler=sampler, collate_fn=collate, **kwargs)
         shuffle_val = shuffle if shuffle is not None else is_train
         return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle_val,
-                          collate_fn=collate_video, **kwargs)
+                          collate_fn=collate, **kwargs)
 
     cls = CompressedVideoDataset if data_type == 'compressed' else CleanVideoDataset
     dataset = cls(
