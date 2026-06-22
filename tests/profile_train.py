@@ -10,13 +10,13 @@ import torch
 
 from utils.data.dataset import CompressedVideoDataset, SequentialVideoBatchSampler, collate_video
 from torch.utils.data import DataLoader
-from models import MambaFixer
+from models import Timback
 from utils.training.losses.composite import CompositeLoss
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_profile_train_model_forward():
-    model = MambaFixer(16, 8, 2, 4, 2).to('cuda').train()
+    model = Timback(16, 8, 2, 4, 2).to('cuda').train()
     x = torch.randn(1, 3, 64, 64, device='cuda')
     model.reset_state(1, 'cuda')
     y = model(x)
@@ -49,7 +49,7 @@ def run_profile():
     loader = DataLoader(ds, batch_sampler=sampler, collate_fn=collate_video, num_workers=0)
     it = iter(loader)
 
-    model = MambaFixer(64, 32, 2, 100, 2, [1, 2, 4, 32]).to('cuda').train()
+    model = Timback(64, 32, 2, 100, 2, [1, 2, 4, 32]).to('cuda').train()
     c = CompositeLoss({
         'charbonnier': 1.0, 'wavelet': 0.5, 'sobel': 0.05, 'fft': 0.1,
     }, device='cuda')

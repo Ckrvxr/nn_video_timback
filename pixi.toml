@@ -1,7 +1,7 @@
 [workspace]
 authors = ["Ckrvxr"]
 channels = ["conda-forge"]
-name = "hyperfixer"
+name = "timback"
 platforms = ["osx-arm64", "linux-64", "win-64"]
 version = "0.1.0"
 

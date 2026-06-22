@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from models.components.color_space import ictcp_to_rgb
+from utils.color_space import ictcp_to_rgb
 from utils.training.losses.charbonnier import CharbonnierLoss
 from utils.training.losses.temporal import TemporalConsistencyLoss
 from utils.training.losses.sobel import SobelLoss

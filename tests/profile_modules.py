@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 from yaml import safe_load
 
-from models import MambaFixer
+from models import Timback
 
 
 class ProfilingHook:
@@ -30,7 +30,7 @@ def profile(config_path: str, H: int, W: int, device: torch.device,
     config = safe_load(open(config_path))
     arch_cfg = config['model_architecture']
 
-    model = MambaFixer(
+    model = Timback(
         num_features=arch_cfg['num_features'],
         state_dimension=arch_cfg['state_dimension'],
         num_features_stream=arch_cfg['num_features_stream'],
@@ -135,7 +135,7 @@ def profile(config_path: str, H: int, W: int, device: torch.device,
 
 def main():
     args = argparse.ArgumentParser()
-    args.add_argument('--config', default='configs/mamba.yaml')
+    args.add_argument('--config', default='configs/prod.yaml')
     args.add_argument('--device', default='cuda')
     args = args.parse_args()
 

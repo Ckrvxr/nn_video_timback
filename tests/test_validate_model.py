@@ -5,12 +5,12 @@ mock_mamba_ssm()
 import torch
 import pytest
 from yaml import safe_load
-from models import MambaFixer
+from models import Timback
 
 
 @pytest.fixture
 def small_model():
-    model = MambaFixer(
+    model = Timback(
         num_features=16, state_dimension=8, num_features_stream=2,
         num_experts=4, n_active=2,
     )
@@ -33,8 +33,8 @@ def test_validate_model_script_entry_point():
     import numpy as np
 
     device = torch.device('cpu')
-    config = safe_load(open('configs/mamba.yaml'))
-    model = MambaFixer(
+    config = safe_load(open('configs/prod.yaml'))
+    model = Timback(
         num_features=config['model_architecture'].get('num_features', 16),
         state_dimension=config['model_architecture'].get('state_dimension', 16),
     ).to(device)

@@ -6,7 +6,7 @@ import torch
 from PIL import Image
 import numpy as np
 
-from models.components.color_space import yuv_to_rgb
+from utils.color_space import yuv_to_rgb
 
 
 def _find_ffmpeg() -> str:

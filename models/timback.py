@@ -8,12 +8,12 @@ from models.components import (
 )
 
 
-class MambaFixer(nn.Module):
+class Timback(nn.Module):
     def __init__(self, num_features: int = 64, state_dimension: int = 32,
                  num_features_stream: int = 2, num_experts: int = 100,
                  n_active: int = 4,
                  dilation_rates: list[int] | None = None,
-                 routing_threshold: float = 1.0):
+                 routing_threshold: float = 1.0,):
         super().__init__()
         self.routing_threshold = routing_threshold
         self.num_features = num_features
@@ -25,7 +25,6 @@ class MambaFixer(nn.Module):
         self.t_ssm = SequenceProcessor(num_features * 2, state_dimension)
         self.z_out_proj = nn.Linear(num_features * 2, num_features)
 
-        # Fusion: c2(8) + c3(16) + c4(32) + z_out(num_features) + h_t(state_dim)
         fusion_in = 8 + 16 + 32 + num_features + state_dimension
         fusion_hidden = min(128, fusion_in)
         self.fusion = nn.Sequential(
@@ -33,7 +32,6 @@ class MambaFixer(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # Router: fusion_hidden + 6 stats → hidden → n_experts
         self.router = MoERouter(fusion_hidden, num_experts)
 
         if dilation_rates is None:

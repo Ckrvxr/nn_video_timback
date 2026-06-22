@@ -4,14 +4,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from models import MambaFixer
+from models import Timback
 
 device = 'cuda'
 H, W = 2160, 3840
 
 for cfg in [(2, [1]), (2, [1, 2, 4, 8]), (1, [1])]:
     nf, dr = cfg
-    model = MambaFixer(42, n_active=1, num_features_stream=nf,
+    model = Timback(42, n_active=1, num_features_stream=nf,
                        dilation_rates=dr, routing_threshold=1.0).to(device)
     model.eval().half()
     for p in model.parameters():

@@ -22,9 +22,9 @@ COLOR_TAGS = [
 ]
 
 LR_PIX_WEIGHTS = {
-    12: [('yuv420p12le', 5), ('yuv420p10le', 4), ('yuv420p', 1)],
-    10: [('yuv420p10le', 7), ('yuv420p', 3)],
-     8: [('yuv420p', 1)],
+    12: [('yuv420p12le', 5), ('yuv444p12le', 0.1), ('yuv420p10le', 4), ('yuv420p', 1)],
+    10: [('yuv420p10le', 7), ('yuv444p10le', 0.15), ('yuv420p', 3)],
+     8: [('yuv420p', 1), ('yuv444p', 0.02)],
 }
 
 AV1_PRESETS = [8, 9, 10, 11, 12]
@@ -181,11 +181,11 @@ def color_conversion_filter(video_path: Path) -> tuple[str | None, str]:
     )
 
 
-def make_scale_filter(w: int, h: int, scale: int) -> str | None:
-    if scale <= 1:
+def make_scale_filter(w: int, h: int, scale_factor: int) -> str | None:
+    if scale_factor <= 1:
         return None
-    out_w = w // scale
-    out_h = h // scale
+    out_w = w // scale_factor
+    out_h = h // scale_factor
     return f'scale={out_w}:{out_h}:flags=lanczos+accurate_rnd+full_chroma_int'
 
 
@@ -244,18 +244,18 @@ def _plan_segments(video_path: Path, args) -> list[dict] | None:
     print(f'  {video_path.name}: source_bits={source_bits}, HR={hr_pix}')
 
     patch_size = getattr(args, 'patch_size', 512)
-    scale = args.scale
+    sf = args.scale_factor
     src_gx = w // patch_size
+    lr_gx = (w // sf) // patch_size
     src_gy = h // patch_size
-    lr_gx = (w // scale) // patch_size
-    lr_gy = (h // scale) // patch_size
+    lr_gy = (h // sf) // patch_size
     max_gx = min(src_gx, lr_gx)
     max_gy = min(src_gy, lr_gy)
     if max_gy < 1 or max_gx < 1:
         return None
 
     lr_pix_opts = LR_PIX_WEIGHTS.get(source_bits, LR_PIX_WEIGHTS[10])
-    lr_scale = make_scale_filter(w, h, args.scale)
+    lr_scale = make_scale_filter(w, h, args.scale_factor)
 
     segments = []
     for seg_idx, start_frame in enumerate(starts):
@@ -280,7 +280,7 @@ def _plan_segments(video_path: Path, args) -> list[dict] | None:
 def process_segment(video_path: Path, seg_idx: int, start_frame: int,
                     gxi: int, gyi: int, fps: float, source_bits: int,
                     lr_pix_opts: list[tuple[str, int]], lr_scale: str | None,
-                    args) -> bool:
+                    args) -> str:
     name = sanitize(video_path.stem)
     rng = random.Random(hash(f'{name}_{seg_idx}_{args.seed}'))
     seg_name = f'{name}_seg{seg_idx}'
@@ -299,10 +299,10 @@ def process_segment(video_path: Path, seg_idx: int, start_frame: int,
     cy = gyi * patch_size
     center = start_frame + lr_padding
 
-    scale = args.scale
-    if scale > 1:
-        hr_vf = f'crop={patch_size * scale}:{patch_size * scale}:{cx}:{cy},scale={patch_size}:{patch_size}'
-        lr_vf = f'crop={patch_size}:{patch_size}:{cx // scale}:{cy // scale}'
+    sf = args.scale_factor
+    if sf > 1:
+        hr_vf = f'crop={patch_size * sf}:{patch_size * sf}:{cx}:{cy},scale={patch_size}:{patch_size}'
+        lr_vf = f'crop={patch_size}:{patch_size}:{cx // sf}:{cy // sf}'
     else:
         hr_vf = f'crop={patch_size}:{patch_size}:{cx}:{cy}'
         lr_vf = f'crop={patch_size}:{patch_size}:{cx}:{cy}'
@@ -392,6 +392,7 @@ def process_segment(video_path: Path, seg_idx: int, start_frame: int,
                     '-i', str(video_path),
                     '-vf', hr_vf,
                     '-c:v', 'ffv1',
+                    '-pix_fmt', 'yuv444p12le',
                     '-frames:v', str(num_frames),
                     *COLOR_TAGS, '-an',
                     str(final_dir / 'HR.mkv'),
@@ -412,7 +413,7 @@ def process_segment(video_path: Path, seg_idx: int, start_frame: int,
                 if _attempt == 2:
                     raise  # give up after 3 attempts
 
-    return True
+    return dir_name
 
 
 def count_segments(video_path: Path, args) -> int:
@@ -460,7 +461,7 @@ def _batch_yuv_to_ictcp_crop_gpu(yuv_frames: list, crop_info: tuple,
         t[:, 1:] = (t[:, 1:] - center) / peak * 255.0 + 128.0
         t = t / 127.5 - 1.0
 
-        from models.components.color_space import yuv_to_ictcp
+        from utils.color_space import yuv_to_ictcp
         with torch.no_grad():
             ictcp = yuv_to_ictcp(t).cpu().numpy().astype(np.float16)
 
@@ -528,15 +529,15 @@ def main():
     parser.add_argument('-i', '--input', required=True, action='append',
                         help='Input video file, directory, or glob pattern')
     parser.add_argument('-o', '--output-dir', type=str, default=None,
-                        help='Output directory (default: ./data/{name})')
+                        help='Output directory (default: ./datasets/{name})')
     parser.add_argument('--name', type=str, default='dataset',
                         help='Dataset name (default: dataset)')
-    parser.add_argument('--scale', type=int, default=1,
-                        help='Downsampling factor (2 = half resolution)')
+    parser.add_argument('--scale', type=float, default=0.5,
+                        help='Downsampling factor (<1 = multiply, >1 = divide; 0.5 = 2x down)')
     parser.add_argument('--slice-frames', type=int, default=30,
                         help='Frames per output window (default: 30)')
-    parser.add_argument('--num-slices', type=int, default=None,
-                        help='Number of segments per video (default: 3)')
+    parser.add_argument('--num-slices', type=int, default=50,
+                        help='Number of segments per video (default: 50)')
     parser.add_argument('--num-frames', type=int, default=30,
                         help='Patch window size in frames (default: 30)')
     parser.add_argument('--patch-size', type=int, default=512,
@@ -547,8 +548,8 @@ def main():
                         default=['av1', 'h265', 'h264'],
                         choices=['av1', 'h265', 'h264'],
                         help='Encoders to randomly pick from (default: all)')
-    parser.add_argument('--workers', type=int, default=2,
-                        help='Parallel videos (default: 2)')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='Parallel videos (default: 1)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed (default: 42)')
     parser.add_argument('--colorspace', type=str, default='bt2020pq',
@@ -558,11 +559,14 @@ def main():
                         help='Force re-encode all segments')
     parser.add_argument('--dry-run', action='store_true',
                         help='Print plan without encoding')
+    parser.add_argument('--preprocess', action='store_true',
+                        help='Generate .npy cache (default: skip, use CPU real-time decoding)')
     args = parser.parse_args()
+    args.scale_factor = int(round(1 / args.scale)) if args.scale < 1 else int(args.scale)
 
     args.name = sanitize(args.name)
     if args.output_dir is None:
-        args.output_dir = f'./data/{args.name}'
+        args.output_dir = f'./datasets/{args.name}'
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     videos = discover_inputs(args.input)
@@ -574,7 +578,7 @@ def main():
     if args.dry_run:
         print(f'Output: {args.output_dir}')
         n_slices = args.num_slices if args.num_slices is not None else 3
-        print(f'Scale: {args.scale}x, Segments: {n_slices}×{args.slice_frames}f, '
+        print(f'Scale: {args.scale} ({args.scale_factor}x down), Segments: {n_slices}×{args.slice_frames}f, '
               f'Variants: {args.num_variants}')
         print(f'Encoders: {", ".join(args.encoders)}')
         print(f'Colorspace: {args.colorspace}, Seed: {args.seed}')
@@ -611,15 +615,16 @@ def main():
             for future in as_completed(futures):
                 s = futures[future]
                 try:
-                    future.result()
-                    pbar.set_postfix_str('')
+                    info = future.result()
+                    pbar.set_postfix_str(f'{s["video_path"].stem}_seg{s["seg_idx"]}: {info}')
                 except Exception as e:
                     pbar.set_postfix_str(f'seg{s["seg_idx"]}: {e}')
                 pbar.update(1)
 
     shutil.rmtree(str(Path(args.output_dir) / '.tmp'), ignore_errors=True)
 
-    preprocess_dataset(args.output_dir)
+    if args.preprocess:
+        preprocess_dataset(args.output_dir)
 
     elapsed = time.perf_counter() - t0
     print(f'\nDone in {elapsed:.0f}s')

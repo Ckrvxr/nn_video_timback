@@ -97,8 +97,8 @@ from utils.training.lr_scheduler import WarmupCosineLR
 from yaml import safe_load
 from tqdm import tqdm
 
-from models import MambaFixer
-from models.components.color_space import yuv_to_rgb, ictcp_to_yuv
+from models import Timback
+from utils.color_space import yuv_to_rgb, ictcp_to_yuv
 from utils.training.losses.composite import CompositeLoss
 from utils.console import console, section, sub_section, metric, divider
 from utils.data.dataset import create_dataloader
@@ -248,13 +248,13 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     mem_check_interval = memory_cfg.get('check_interval', 0)
     
     model_name = model_cfg.get('model_name', 'hyper_fixer')
-    is_mamba = model_name == 'mamba_fixer'
-    sequential = dataset_cfg.get('sequential_mode', False) and is_mamba
+    is_timback = model_name == 'timback'
+    sequential = dataset_cfg.get('sequential_mode', False) and is_timback
     center_idx = dataset_cfg['num_frames'] // 2
     expert_counts = torch.zeros(model_cfg.get('num_experts', 100), device='cpu')
     use_sam = training_cfg.get('enable_sam', False)
 
-    if is_mamba:
+    if is_timback:
         model.reset_state(bs or 1, device)
 
     pbar = tqdm(total=n_samples, desc="Training", unit="sample", leave=False, miniters=10)
@@ -343,7 +343,7 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
             return loss, loss_dict
 
         # Save initial Mamba state for the second pass of SAM
-        if use_sam and is_mamba and hasattr(model, '_t_state') and model._t_state is not None:
+        if use_sam and is_timback and hasattr(model, '_t_state') and model._t_state is not None:
             saved_state = model._t_state.clone()
         else:
             saved_state = None
@@ -559,7 +559,7 @@ def validate(model, val_loader, device, max_samples=100, num_vmaf_samples=0):
     total_fpsnr = 0.0
     n = 0
     n_vmaf = 0
-    is_mamba = isinstance(model, MambaFixer)
+    is_timback = isinstance(model, Timback)
 
     for batch in val_loader:
         if n >= max_samples:
@@ -568,7 +568,7 @@ def validate(model, val_loader, device, max_samples=100, num_vmaf_samples=0):
         lr = batch['lr_frames'].to(device, non_blocking=True)
         hr = batch['hr'].to(device, non_blocking=True)
 
-        if is_mamba:
+        if is_timback:
             model.reset_state(lr.size(0), device)
             pred = model(lr[:, lr.size(1)//2].to(memory_format=torch.channels_last))
         else:
@@ -623,8 +623,8 @@ def main():
 
     section("Training Setup")
 
-    if model_name == 'mamba_fixer':
-        model = MambaFixer(
+    if model_name == 'timback':
+        model = Timback(
             num_features=model_cfg.get('num_features', 16),
             state_dimension=model_cfg.get('state_dimension', 32),
             num_features_stream=model_cfg.get('num_features_stream', 2),
@@ -822,6 +822,10 @@ def main():
 
     try:
         for epoch in range(start_epoch, n_epochs):
+            moe_t0 = model_cfg.get('moe_temperature', 1.0)
+            moe_anneal = n_epochs // 2
+            model.router.temperature = max(1.0, moe_t0 - (moe_t0 - 1.0) * min(epoch, moe_anneal) / moe_anneal)
+
             # Apply warmup weights if configured for this epoch
             wu_weights = _get_epoch_weights(epoch, config.get('schedule', []), config['loss_weights'])
             if wu_weights is not None:

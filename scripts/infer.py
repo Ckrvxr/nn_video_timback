@@ -13,17 +13,17 @@ import torch
 import tqdm
 from yaml import safe_load
 
-from models import MambaFixer
+from models import Timback
 from models.components import yuv_to_ictcp, ictcp_to_yuv
 from utils.data.video_loader import frame_to_yuv
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='MambaFixer inference')
+    parser = argparse.ArgumentParser(description='Timback inference')
     parser.add_argument('checkpoint', type=str, help='Path to .pth checkpoint')
     parser.add_argument('input', type=str, help='Input compressed video')
     parser.add_argument('--output', '-o', type=str, default=None, help='Output video path')
-    parser.add_argument('--config', type=str, default='configs/mamba.yaml')
+    parser.add_argument('--config', type=str, default='configs/test.yaml')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--codec', type=str, default='h264',
                         choices=['h264', 'h265', 'ffv1'],
@@ -41,7 +41,7 @@ def main():
         torch.backends.cudnn.benchmark = True
 
     arch_cfg = config['model_architecture']
-    model = MambaFixer(
+    model = Timback(
         num_features=arch_cfg.get('num_features', 64),
         state_dimension=arch_cfg.get('state_dimension', 32),
         num_features_stream=arch_cfg.get('num_features_stream', 2),

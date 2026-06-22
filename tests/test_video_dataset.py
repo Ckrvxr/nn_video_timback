@@ -12,7 +12,7 @@ from utils.data.video_loader import probe_frame_count, probe_resolution
 from utils.data.frame_cache import LazyFrameRange
 from utils.data.dataset import CompressedVideoDataset, VideoBatchSampler, collate_video, _yuv_to_ictcp
 from torch.utils.data import DataLoader
-from models import MambaFixer
+from models import Timback
 from utils.training.losses.composite import CompositeLoss
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -32,7 +32,7 @@ def test_yuv_to_ictcp_float16():
 
 def test_model_forward_shape(device):
     x = torch.randn((4, 3, 512, 512), device=device)
-    model = MambaFixer(64, 32, 2, 4, 2, [1, 2, 4]).to(device)
+    model = Timback(64, 32, 2, 4, 2, [1, 2, 4]).to(device)
     model.reset_state(4, device)
     with torch.no_grad():
         pred = model(x)
@@ -40,7 +40,7 @@ def test_model_forward_shape(device):
 
 
 def test_loss_backward(device):
-    model = MambaFixer(64, 32, 2, 4, 2, [1, 2, 4]).to(device)
+    model = Timback(64, 32, 2, 4, 2, [1, 2, 4]).to(device)
     x = torch.randn((4, 3, 512, 512), device=device, requires_grad=True)
     criterion = CompositeLoss({'charbonnier': 1.0, 'wavelet': 0.5})
     loss_dict = criterion(x, x)
@@ -122,7 +122,7 @@ class TestDatasetPipeline:
         item = (ds.videos[0]['name'], ds.videos[0]['variants'][0], 40,
                 ds.videos[0]['ds_root'], 0, 0)
         out = ds[item]
-        model = MambaFixer(64, 32, 2, 100, 2, [1, 2, 4, 32]).to(device).eval()
+        model = Timback(64, 32, 2, 100, 2, [1, 2, 4, 32]).to(device).eval()
         x = out['hr'].unsqueeze(0).to(device)
         model.reset_state(1, device)
         with torch.no_grad():

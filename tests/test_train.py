@@ -55,7 +55,7 @@ def test_multi_dataset_sequential(
             'validation_num_workers': 2,
         },
         'model_architecture': {
-            'model_name': 'mamba_fixer',
+            'model_name': 'timback',
             'num_features': 64,
             'state_dimension': 32,
             'num_features_stream': 2,
@@ -137,7 +137,7 @@ def test_pause_and_exit_triggers():
                 'batch_size': 2,
             },
             'model_architecture': {
-                'model_name': 'mamba_fixer',
+                'model_name': 'timback',
                 'num_experts': 100,
                 'n_active': 4,
             },

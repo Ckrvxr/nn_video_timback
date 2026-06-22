@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
-from models import MambaFixer
+from models import Timback
 
 
 class ProfilingHook:
@@ -31,7 +31,7 @@ def profile(num_experts: int, n_active: int, nf: int,
             n_warmup: int = 10, n_measure: int = 50):
     if dilation_rates is None:
         dilation_rates = [1, 2, 4, 8]
-    model = MambaFixer(
+    model = Timback(
         num_features=64,
         state_dimension=32,
         num_features_stream=nf,

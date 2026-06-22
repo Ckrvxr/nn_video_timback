@@ -7,15 +7,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 import torch
-from models import MambaFixer
+from models import Timback
 from models.components import yuv_to_ictcp, ictcp_to_yuv
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_bench_4k_model_instantiation():
-    config = safe_load(open('configs/mamba.yaml'))
+    config = safe_load(open('configs/prod.yaml'))
     arch_cfg = config['model_architecture']
-    model = MambaFixer(
+    model = Timback(
         num_features=arch_cfg.get('num_features', 64),
         state_dimension=arch_cfg.get('state_dimension', 32),
         num_features_stream=arch_cfg.get('num_features_stream', 2),
@@ -40,8 +40,8 @@ def run_benchmark():
     if device.type != 'cuda':
         print("WARNING: CUDA is not available. Running on CPU will be extremely slow.")
         
-    # Read production configuration from configs/mamba.yaml
-    config = safe_load(open('configs/mamba.yaml'))
+    # Read production configuration from configs/prod.yaml
+    config = safe_load(open('configs/prod.yaml'))
     arch_cfg = config['model_architecture']
     
     num_features = arch_cfg.get('num_features', 64)
@@ -68,7 +68,7 @@ def run_benchmark():
         print(f"\nBenchmarking in {prec}...")
         
         # Initialize model
-        model = MambaFixer(
+        model = Timback(
             num_features=num_features,
             state_dimension=state_dimension,
             num_features_stream=num_features_stream,

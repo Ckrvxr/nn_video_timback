@@ -7,7 +7,7 @@ runs/
 *.log
 
 # Data
-data/
+datasets/
 
 # Editors
 .vscode/

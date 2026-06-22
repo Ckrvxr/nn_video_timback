@@ -12,9 +12,9 @@ import numpy as np
 
 
 def test_profile_pipeline_model_forward():
-    from models import MambaFixer
+    from models import Timback
     from utils.training.losses.composite import CompositeLoss
-    model = MambaFixer(16, 8, 2, 4, 2)
+    model = Timback(16, 8, 2, 4, 2)
     model.eval()
     x = torch.randn(1, 3, 64, 64)
     model.reset_state(1, 'cpu')
@@ -29,7 +29,7 @@ def test_profile_pipeline_model_forward():
 
 
 def test_profile_pipeline_color_conversion():
-    from models.components.color_space import yuv_to_ictcp_np, rgb_to_ictcp_np, ictcp_to_rgb_np
+    from utils.color_space import yuv_to_ictcp_np, rgb_to_ictcp_np, ictcp_to_rgb_np
     yuv = np.random.randint(0, 256, (1, 64, 64, 3)).astype(np.uint8)
     ictcp = yuv_to_ictcp_np(yuv)
     assert ictcp.shape == yuv.shape
@@ -131,8 +131,8 @@ def run_profile():
 
     # 7. Model forward
     print("\n--- 7. Model forward ---")
-    from models import MambaFixer
-    model = MambaFixer(64, 32, 2, 100, 4, [1, 2, 4, 32]).to('cuda')
+    from models import Timback
+    model = Timback(64, 32, 2, 100, 4, [1, 2, 4, 32]).to('cuda')
     x = torch.randn((4, 3, 512, 512), device='cuda')
     model.reset_state(4, 'cuda')
     _ = model(x)
@@ -177,7 +177,7 @@ def run_profile():
 
     # 10. Color conversion throughput benchmark
     print("\n--- 10. Color conversion throughput ---")
-    from models.components.color_space import (
+    from utils.color_space import (
         yuv_to_ictcp_np, rgb_to_ictcp_np, ictcp_to_rgb_np,
         yuv_to_ictcp, rgb_to_ictcp, ictcp_to_rgb,
     )

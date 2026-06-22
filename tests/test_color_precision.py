@@ -15,7 +15,7 @@ mock_mamba_ssm()
 
 import numpy as np
 import torch
-from models.components.color_space import (
+from utils.color_space import (
     yuv_to_ictcp_np, ictcp_to_yuv_np, rgb_to_ictcp_np, ictcp_to_rgb_np,
     eotf_pq_np, oetf_pq_np,
     yuv_to_ictcp, ictcp_to_yuv, rgb_to_ictcp, ictcp_to_rgb,

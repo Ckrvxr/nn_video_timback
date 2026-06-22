@@ -7,6 +7,7 @@ dataset:
     - ./data/catchme
   val_dataset_paths:
     - ./data/catchme_val
+  data_type: raw
   patch_size: 512
   num_frames: 9
   sequential_mode: true
@@ -17,7 +18,7 @@ dataset:
   clip_repeat_factor: 1
 
 model_architecture:
-  model_name: mamba_fixer
+  model_name: timback
   num_features: 64
   state_dimension: 32
   num_features_stream: 2

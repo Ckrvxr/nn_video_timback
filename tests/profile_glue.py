@@ -5,13 +5,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
-from models import MambaFixer
+from models import Timback
 
 
 @torch.inference_mode()
 def profile_sections(H: int, W: int, device: torch.device,
                      n_warmup: int = 20, n_measure: int = 50):
-    model = MambaFixer(num_experts=42, num_features_stream=2, n_active=1,
+    model = Timback(num_experts=42, num_features_stream=2, n_active=1,
                        routing_threshold=1.0, dilation_rates=[1, 2, 4, 8]).to(device)
     model.eval().half()
     for p in model.parameters():

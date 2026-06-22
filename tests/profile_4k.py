@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 from yaml import safe_load
 
-from models import MambaFixer
+from models import Timback
 
 
 class ProfilingHook:
@@ -27,7 +27,7 @@ class ProfilingHook:
 
 def profile(num_features_stream: int, H: int, W: int, device: torch.device,
             n_warmup: int = 10, n_measure: int = 50):
-    model = MambaFixer(
+    model = Timback(
         num_features=64,
         state_dimension=32,
         num_features_stream=num_features_stream,

@@ -3,18 +3,18 @@ mock_triton()
 mock_mamba_ssm()
 
 import torch
-from models import MambaFixer
+from models import Timback
 
 
-def test_mamba_fixer_forward(small_mamba_fixer, device):
+def test_timback_forward(small_timback, device):
     x = torch.randn(2, 3, 32, 32, device=device)
-    small_mamba_fixer.reset_state(2, device)
-    out = small_mamba_fixer(x)
+    small_timback.reset_state(2, device)
+    out = small_timback(x)
     assert out.shape == (2, 3, 32, 32)
 
 
-def test_mamba_fixer_adaptive_routing(device):
-    model = MambaFixer(
+def test_timback_adaptive_routing(device):
+    model = Timback(
         num_features=16, state_dimension=8, num_features_stream=2,
         num_experts=10, n_active=4, routing_threshold=0.85,
     ).to(device)
