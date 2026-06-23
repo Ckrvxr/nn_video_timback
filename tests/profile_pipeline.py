@@ -12,7 +12,7 @@ import numpy as np
 
 
 def test_profile_pipeline_model_forward():
-    from models import Timback
+    from components import Timback
     from utils.training.losses.composite import CompositeLoss
     model = Timback(16, 8, 2, 4, 2)
     model.eval()
@@ -99,21 +99,21 @@ def run_profile():
 
     # 5. YUV -> ICtCp CUDA
     print("\n--- 5. Color conversion ---")
-    from utils.data.dataset import _yuv_to_ictcp
+    from utils.data.ictcp import yuv_to_ictcp_np_batch
     gc.collect()
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
-    _ = _yuv_to_ictcp(a)
+    _ = yuv_to_ictcp_np_batch(a)
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     t0 = time.perf_counter()
     for _ in range(5):
-        _ = _yuv_to_ictcp(a)
+        _ = yuv_to_ictcp_np_batch(a)
     t1 = time.perf_counter()
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     print(f"  YUV->ICtCp CUDA:   {(t1-t0)/5:.3f}s  ({(t1-t0)/5/9*1000:.1f}ms/frame)")
 
     # 6. Full __getitem__
     print("\n--- 6. Dataset __getitem__ ---")
-    from utils.data.dataset import CompressedVideoDataset
+    from utils.data.compressed_dataset import CompressedVideoDataset
     ds = CompressedVideoDataset(
         datasets=[str(PROJECT_ROOT / 'data' / 'val')], patch_size=512, frames=9, is_train=True)
     item = (ds.videos[0]['name'], ds.videos[0]['variants'][0], 40, ds.videos[0]['ds_root'], 0, 0)
@@ -131,7 +131,7 @@ def run_profile():
 
     # 7. Model forward
     print("\n--- 7. Model forward ---")
-    from models import Timback
+    from components import Timback
     model = Timback(64, 32, 2, 100, 4, [1, 2, 4, 32]).to('cuda')
     x = torch.randn((4, 3, 512, 512), device='cuda')
     model.reset_state(4, 'cuda')
@@ -160,7 +160,8 @@ def run_profile():
 
     # 9. DataLoader batches
     print("\n--- 9. DataLoader batches (SequentialVideoBatchSampler) ---")
-    from utils.data.dataset import SequentialVideoBatchSampler, collate_video
+    from utils.data.compressed_samplers import SequentialVideoBatchSampler
+    from utils.data.dataset import collate_video
     from torch.utils.data import DataLoader
     sampler = SequentialVideoBatchSampler(ds, batch_size=4)
     loader = DataLoader(ds, batch_sampler=sampler, collate_fn=collate_video, num_workers=0)

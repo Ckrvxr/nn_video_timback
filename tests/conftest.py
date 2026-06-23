@@ -30,7 +30,7 @@ def val_dir():
 
 @pytest.fixture
 def small_timback(device):
-    from models import Timback
+    from components import Timback
     model = Timback(
         num_features=16, state_dimension=8, num_features_stream=2,
         num_experts=4, n_active=2,

@@ -5,7 +5,7 @@ mock_mamba_ssm()
 import torch
 import pytest
 from yaml import safe_load
-from models import Timback
+from components import Timback
 
 
 @pytest.fixture

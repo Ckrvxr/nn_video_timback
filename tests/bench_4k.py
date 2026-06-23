@@ -7,8 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 import torch
-from models import Timback
-from models.components import yuv_to_ictcp, ictcp_to_yuv
+from components import Timback
+from utils.color_space import yuv_to_ictcp, ictcp_to_yuv
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

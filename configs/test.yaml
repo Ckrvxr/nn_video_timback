@@ -2,20 +2,24 @@ output_directory: runs/testrun
 random_seed: 42
 
 dataset:
-  data_type: preprocessed
+  data_type: raw
   dataset_paths:
-    - ./data/catchme
+    - ./dataset/game/death_stranding
+    - ./datasets/cantoon/monsters_university
+    - ./datasets/kpop/newjeans_attention
   val_dataset_paths:
-    - ./data/catchme_val
+    - ./datasets/val/alysa_liu_stateside_025x
+    - ./datasets/val/death_stranding
+    - ./datasets/val/newjeans_attention
   data_type: raw
   patch_size: 512
   num_frames: 9
   sequential_mode: true
   validation_batch_size: 2
-  num_workers: 1
-  validation_num_workers: 0
+  num_workers: 2
+  validation_num_workers: 2
   shuffle_variants: true
-  clip_repeat_factor: 1
+  segment_repeat: 1
 
 model_architecture:
   model_name: timback
@@ -45,9 +49,9 @@ training_settings:
 loss_weights:
   charbonnier: 1.0
   rgb: 0.1
-  wavelet: 0.5
+  gmsd: 0.1
+  haarpsi: 0.45
   fft: 0.1
-  sobel: 0.05
   ms_ssim: 0.1
   temporal_consistency: 0.0
 

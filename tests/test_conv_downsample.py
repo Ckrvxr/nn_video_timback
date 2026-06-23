@@ -3,7 +3,7 @@ mock_triton()
 mock_mamba_ssm()
 
 import torch
-from models import Timback
+from components import Timback
 
 
 def test_timback_forward(small_timback, device):

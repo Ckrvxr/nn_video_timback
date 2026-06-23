@@ -20,6 +20,7 @@ python-blosc = ">=1.11.4,<2"
 pytest = ">=9.1.1,<10"
 lz4 = ">=4.4.5,<5"
 matplotlib = ">=3.10.9,<4"
+psutil = ">=7.2.2,<8"
 
 [pypi-dependencies]
 loguru = "*"

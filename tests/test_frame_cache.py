@@ -32,8 +32,7 @@ def test_lazy_live_decode():
         assert len(frames) == 10
         for f in frames:
             assert f.shape == (240, 320, 3)
-            assert f.dtype == np.float32
-            assert f[:, :, 0].min() >= -0.05 and f[:, :, 0].max() <= 1.05
+            assert f.dtype == np.uint8
 
         f0 = lr[0]
         assert f0.shape == (240, 320, 3)

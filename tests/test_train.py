@@ -11,12 +11,13 @@ mock_triton()
 import torch
 import torch.nn as nn
 from scripts import train
+from utils.training import cli
 
 
 class DummyModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv = nn.Conv2d(3, 3, kernel_size=1)
+        self.conv = nn.Conv2d(3, 3, kernel_size=1).half()
         self._balancing_loss = torch.tensor(0.0, requires_grad=True)
 
     def train(self, mode=True):
@@ -29,7 +30,7 @@ class DummyModel(nn.Module):
         pass
 
 
-@patch('scripts.train.create_dataloader')
+@patch('utils.training.setup.create_dataloader')
 @patch('scripts.train.train_epoch')
 @patch('scripts.train.validate')
 @patch('scripts.train.save_checkpoint')
@@ -105,24 +106,18 @@ def test_multi_dataset_sequential(
          patch('scripts.train.Path.glob', return_value=[]):
         train.main()
 
-        ds_a_call = call(
-            datasets=['./data/datasets/ds_a'],
+        ds_call = call(
+            datasets=['./data/datasets/ds_a', './data/datasets/ds_b'],
             batch_size=4, patch_size=256, frames=5, workers=2,
-            is_train=True, clip_repeat=1, sequential=False,
-            persistent_workers=False,
+            is_train=True, segment_repeat=1, sequential=False,
+            data_type='compressed', max_cached_segments=8,
         )
-        ds_b_call = call(
-            datasets=['./data/datasets/ds_b'],
-            batch_size=4, patch_size=256, frames=5, workers=2,
-            is_train=True, clip_repeat=1, sequential=False,
-            persistent_workers=False,
-        )
-        mock_create_dataloader.assert_has_calls([ds_a_call, ds_b_call], any_order=True)
-        assert mock_train_epoch.call_count >= 2
+        mock_create_dataloader.assert_has_calls([ds_call])
+        assert mock_train_epoch.call_count == 1
 
 
 def test_pause_and_exit_triggers():
-    train.EXIT_FLAG = False
+    cli.EXIT_FLAG = False
 
     with tempfile.TemporaryDirectory() as tmpdir:
         run_dir = Path(tmpdir)
@@ -131,6 +126,7 @@ def test_pause_and_exit_triggers():
 
         model = DummyModel()
         config = {
+            'loss_weights': {},
             'training_settings': {
                 'gradient_accumulation_steps': 1,
                 'gradient_clipping_threshold': 1.0,
@@ -189,6 +185,6 @@ def test_pause_and_exit_triggers():
         duration = time.perf_counter() - start_time
 
         assert duration >= 1.5, f"Training did not pause! Duration: {duration:.2f}s"
-        assert train.EXIT_FLAG is True
+        assert cli.EXIT_FLAG is True
         assert not exit_file.exists()
         assert not pause_file.exists()

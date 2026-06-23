@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
-from models import Timback
+from components import Timback
 
 
 @torch.inference_mode()
@@ -40,8 +40,8 @@ def profile_sections(H: int, W: int, device: torch.device,
 
     T_ssm = time_sec(lambda: model.forward_ssm_ictcp(x))
 
-    z_c2, z_c3, z_c4, z_out, h_t = model.forward_ssm_ictcp(x)
-    router_in = torch.cat([z_c2, z_c3, z_c4, z_out, h_t], dim=-1)
+    z_c2, z_c3, z_c4, z_c5, z_out, h_t = model.forward_ssm_ictcp(x)
+    router_in = torch.cat([z_c2, z_c3, z_c4, z_c5, z_out, h_t], dim=-1)
     T_fr = time_sec(lambda: (model.fusion(router_in),
                               model.router(model.fusion(router_in), x, k=1, threshold=1.0)))
 

@@ -60,9 +60,9 @@ def compute_vmaf(
 
     cmd = [
         ffmpeg_path, '-hide_banner',
-        '-i', ref_path,
         '-i', pred_path,
-        '-lavfi', 'libvmaf',
+        '-i', ref_path,
+        '-lavfi', '[0:v][1:v]libvmaf',
         '-f', 'null', '-',
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)

@@ -8,9 +8,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 import torch
 
-from utils.data.dataset import CompressedVideoDataset, SequentialVideoBatchSampler, collate_video
+from utils.data.compressed_dataset import CompressedVideoDataset
+from utils.data.compressed_samplers import SequentialVideoBatchSampler
+from utils.data.dataset import collate_video
 from torch.utils.data import DataLoader
-from models import Timback
+from components import Timback
 from utils.training.losses.composite import CompositeLoss
 
 

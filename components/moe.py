@@ -4,7 +4,8 @@ import torch.nn.functional as F
 
 
 class MoERouter(nn.Module):
-    def __init__(self, n_features: int = 16, n_experts: int = 100, stat_features: int = 6):
+    def __init__(self, n_features: int = 16, n_experts: int = 100, stat_features: int = 6,
+                 noise_std: float = 0.05):
         super().__init__()
         total_in = n_features + stat_features
         hidden_dim = max(16, total_in // 2)
@@ -14,7 +15,7 @@ class MoERouter(nn.Module):
             nn.Linear(hidden_dim, n_experts)
         )
         self.n_experts = n_experts
-        self.temperature = 1.0
+        self.noise_std = noise_std
 
     def forward(self, z_t: torch.Tensor, ictcp: torch.Tensor | None = None,
                 k: int = 4, threshold: float = 1.0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -30,7 +31,10 @@ class MoERouter(nn.Module):
         x = torch.cat([x_feat, stats], dim=1)  # [B, n_features + 6]
         logits = self.router(x)
 
-        probs = F.softmax(logits / self.temperature, dim=-1)
+        if self.training and self.noise_std > 0:
+            logits = logits + torch.randn_like(logits) * self.noise_std
+
+        probs = F.softmax(logits, dim=-1)
 
         if threshold < 1.0:
             sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
@@ -54,6 +58,6 @@ class MoERouter(nn.Module):
 
     def load_balancing_loss(self, logits: torch.Tensor) -> torch.Tensor:
         probs = F.softmax(logits, dim=-1)
-        weights = probs.mean(dim=0)
-        target = torch.ones(self.n_experts, device=logits.device) / self.n_experts
-        return (weights - target).pow(2).sum() * self.n_experts
+        importance = probs.mean(dim=0)
+        cv = importance.std() / (importance.mean() + 1e-8)
+        return cv ** 2

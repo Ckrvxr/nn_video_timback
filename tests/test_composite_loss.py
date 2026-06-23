@@ -31,28 +31,28 @@ def test_composite_default_config_uses_only_charbonnier(pred_target):
     assert losses['char'].item() > 0.0
     assert losses['total'].item() == losses['char'].item()
     # all non-charbonnier losses are 0.0
-    for k in ('wavelet', 'sobel', 'fft', 'rgb', 'ms_ssim'):
+    for k in ('fft', 'rgb', 'ms_ssim', 'gmsd', 'haarpsi'):
         assert losses[k].item() == 0.0
 
 
 def test_composite_dict_keys(pred_target):
     pred, target = pred_target
     criterion = CompositeLoss({
-        'charbonnier': 1.0, 'wavelet': 0.5, 'sobel': 0.05, 'fft': 0.1,
+        'charbonnier': 1.0, 'ms_ssim': 0.5, 'haarpsi': 0.05, 'fft': 0.1,
     })
     losses = criterion(pred, target)
     # losses with weight > 0 have non-zero values
-    for k in ('char', 'wavelet', 'sobel', 'fft'):
+    for k in ('char', 'haarpsi', 'fft'):
         assert losses[k].item() > 0.0
     # losses with weight = 0 are 0.0
-    for k in ('rgb', 'ms_ssim'):
+    for k in ('rgb', 'gmsd'):
         assert losses[k].item() == 0.0
 
 
 def test_composite_total_is_sum(pred_target):
     pred, target = pred_target
     criterion = CompositeLoss({
-        'charbonnier': 1.0, 'wavelet': 0.5, 'sobel': 0.05, 'fft': 0.1,
+        'charbonnier': 1.0, 'ms_ssim': 0.5, 'haarpsi': 0.05, 'fft': 0.1,
     })
     losses = criterion(pred, target)
     components = {k: v for k, v in losses.items() if k != 'total'}
@@ -63,7 +63,7 @@ def test_composite_weights_scale_contributions(pred_target):
     pred, target = pred_target
     w_char = 2.0
     w_wavelet = 0.0
-    criterion = CompositeLoss({'charbonnier': w_char, 'wavelet': w_wavelet})
+    criterion = CompositeLoss({'charbonnier': w_char, 'fft': w_wavelet})
     losses = criterion(pred, target)
     char_noscale = CompositeLoss({'charbonnier': 1.0})(pred, target)['char']
     assert torch.isclose(losses['char'], char_noscale * w_char, atol=1e-6)
@@ -84,7 +84,7 @@ def test_composite_temporal_included_when_prev_provided(pred_target_seq):
 def test_composite_gradient_flow(pred_target):
     pred, target = pred_target
     criterion = CompositeLoss({
-        'charbonnier': 1.0, 'wavelet': 0.5, 'sobel': 0.05, 'fft': 0.1,
+        'charbonnier': 1.0, 'ms_ssim': 0.5, 'haarpsi': 0.05, 'fft': 0.1,
     })
     losses = criterion(pred, target)
     losses['total'].backward()
@@ -122,5 +122,5 @@ def test_composite_empty_config_defaults_to_charbonnier(pred_target):
     losses = criterion(pred, target)
     assert losses['total'].item() > 0.0
     assert losses['total'].item() == losses['char'].item()
-    for k in ('wavelet', 'sobel', 'fft', 'rgb', 'ms_ssim'):
+    for k in ('fft', 'rgb', 'ms_ssim', 'gmsd', 'haarpsi'):
         assert losses[k].item() == 0.0

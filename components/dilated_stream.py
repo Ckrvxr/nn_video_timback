@@ -75,6 +75,13 @@ class ParallelExperts(nn.Module):
         nf = self.nf
         G = self.in_ch
 
+        from utils.memory import check_gpu_allocation
+        est = B * k * G * H * W * 4 * 6
+        if not check_gpu_allocation(est, x.device, 0.85):
+            k = max(1, k // 2)
+            idx = idx[:, :k]
+            weights = weights[:, :k]
+
         x_rep = x.repeat(1, k, 1, 1)
         x_rep = x_rep.view(1, B * k * G, H, W)
 
@@ -83,20 +90,23 @@ class ParallelExperts(nn.Module):
         import torch.nn.functional as F
         W_down = self.down_weight[flat_idx].view(B * k * nf * G, 1, 3, 3)
         b_down = self.down_bias[flat_idx].view(B * k * nf * G)
-        x_feat = F.conv2d(x_rep, W_down, b_down, stride=2, padding=1, groups=B * k * G)
+        x_feat = F.conv2d(F.pad(x_rep, (1, 1, 1, 1), 'reflect'),
+                          W_down, b_down, stride=2, padding=0, groups=B * k * G)
 
         skip = x_feat
         for i, d in enumerate(self.dilations):
             W_c = self.conv_weights[i][flat_idx].view(B * k * nf * G, nf, 3, 3)
             b_c = self.conv_biases[i][flat_idx].view(B * k * nf * G)
             w_p = self.prelu_weights[i][flat_idx].view(B * k * nf * G)
-            x_feat = F.conv2d(x_feat, W_c, b_c, stride=1, padding=d, dilation=d, groups=B * k * G)
+            x_feat = F.conv2d(F.pad(x_feat, (d, d, d, d), 'reflect'),
+                              W_c, b_c, stride=1, padding=0, dilation=d, groups=B * k * G)
             x_feat = F.prelu(x_feat, w_p)
         x_feat = x_feat + skip
 
         W_up1 = self.up1_weight[flat_idx].view(B * k * nf * G * 4, nf, 3, 3)
         b_up1 = self.up1_bias[flat_idx].view(B * k * nf * G * 4)
-        x_feat = F.conv2d(x_feat, W_up1, b_up1, stride=1, padding=1, groups=B * k * G)
+        x_feat = F.conv2d(F.pad(x_feat, (1, 1, 1, 1), 'reflect'),
+                          W_up1, b_up1, stride=1, padding=0, groups=B * k * G)
 
         H_half, W_half = x_feat.shape[-2], x_feat.shape[-1]
         x_feat = x_feat.view(B * k, nf * G * 4, H_half, W_half)
@@ -105,11 +115,13 @@ class ParallelExperts(nn.Module):
 
         W_up2 = self.up2_weight[flat_idx].view(B * k * G, nf, 3, 3)
         b_up2 = self.up2_bias[flat_idx].view(B * k * G)
-        x_feat = F.conv2d(x_feat, W_up2, b_up2, stride=1, padding=1, groups=B * k * G)
+        x_feat = F.conv2d(F.pad(x_feat, (1, 1, 1, 1), 'reflect'),
+                          W_up2, b_up2, stride=1, padding=0, groups=B * k * G)
 
         W_depth = self.depth_weight[flat_idx].view(B * k * G, 1, 3, 3)
         b_depth = self.depth_bias[flat_idx].view(B * k * G)
-        x_depth = F.conv2d(x_rep, W_depth, b_depth, stride=1, padding=1, groups=B * k * G)
+        x_depth = F.conv2d(F.pad(x_rep, (1, 1, 1, 1), 'reflect'),
+                           W_depth, b_depth, stride=1, padding=0, groups=B * k * G)
         x_feat = x_feat + x_depth
 
         out_delta = x_feat.view(B, k, G, H, W)

@@ -8,11 +8,14 @@ import pytest
 from tests.helpers import mock_mamba_ssm
 mock_mamba_ssm()
 
-from utils.data.video_loader import probe_frame_count, probe_resolution
+from utils.data.video_probe import probe_frame_count, probe_resolution
 from utils.data.frame_cache import LazyFrameRange
-from utils.data.dataset import CompressedVideoDataset, VideoBatchSampler, collate_video, _yuv_to_ictcp
+from utils.data.compressed_dataset import CompressedVideoDataset
+from utils.data.compressed_samplers import VideoBatchSampler
+from utils.data.dataset import collate_video
+from utils.data.ictcp import yuv_to_ictcp_np_batch
 from torch.utils.data import DataLoader
-from models import Timback
+from components import Timback
 from utils.training.losses.composite import CompositeLoss
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,8 +29,10 @@ HAS_REAL_VIDEO = VAL_VIDEO.exists()
 def test_yuv_to_ictcp_float16():
     fake_yuv = np.random.randint(0, 256, (1, 64, 64, 3)).astype(np.uint16)
     fake_yuv[..., 0] = 256
-    result = _yuv_to_ictcp(fake_yuv)
-    assert result.dtype == np.float16
+    result = yuv_to_ictcp_np_batch(fake_yuv)
+    assert result.dtype == torch.float16
+    assert result.device.type == 'cuda'
+    assert result.shape == (1, 3, 64, 64)
 
 
 def test_model_forward_shape(device):
@@ -90,8 +95,9 @@ class TestDatasetPipeline:
         fr = LazyFrameRange(str(VAL_VIDEO), 87, window_size=9)
         f = fr[0]
         yuv_crop = f[0:512, 0:512]
-        ictcp = _yuv_to_ictcp(yuv_crop[np.newaxis, ...])
-        assert ictcp.dtype == np.float16
+        ictcp = yuv_to_ictcp_np_batch(yuv_crop[np.newaxis, ...])
+        assert ictcp.dtype == torch.float16
+        assert ictcp.device.type == 'cuda'
 
     def test_dataset_getitem_float32(self):
         ds = CompressedVideoDataset(

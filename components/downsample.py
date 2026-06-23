@@ -6,15 +6,15 @@ import torch.nn.functional as F
 class DownsampleChain(nn.Module):
     def __init__(self, in_ch: int = 1, out_ch: int = 64):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_ch, 4, kernel_size=3, stride=2, padding=1)
+        self.conv1 = nn.Conv2d(in_ch, 4, kernel_size=3, stride=2, padding=1, padding_mode='reflect')
         self.relu1 = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(4, 8, kernel_size=3, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(4, 8, kernel_size=3, stride=2, padding=1, padding_mode='reflect')
         self.relu2 = nn.ReLU(inplace=True)
-        self.conv3 = nn.Conv2d(8, 16, kernel_size=3, stride=2, padding=1)
+        self.conv3 = nn.Conv2d(8, 16, kernel_size=3, stride=2, padding=1, padding_mode='reflect')
         self.relu3 = nn.ReLU(inplace=True)
-        self.conv4 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.conv4 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1, padding_mode='reflect')
         self.relu4 = nn.ReLU(inplace=True)
-        self.conv5 = nn.Conv2d(32, out_ch, kernel_size=3, stride=2, padding=1)
+        self.conv5 = nn.Conv2d(32, out_ch, kernel_size=3, stride=2, padding=1, padding_mode='reflect')
         self.relu5 = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor):

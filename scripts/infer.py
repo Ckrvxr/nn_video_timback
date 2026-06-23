@@ -13,8 +13,8 @@ import torch
 import tqdm
 from yaml import safe_load
 
-from models import Timback
-from models.components import yuv_to_ictcp, ictcp_to_yuv
+from components import Timback
+from utils.color_space import yuv_to_ictcp, ictcp_to_yuv
 from utils.data.video_loader import frame_to_yuv
 
 

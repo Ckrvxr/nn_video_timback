@@ -1,11 +1,10 @@
 import torch
 import torch.nn as nn
-from models.components import (
-    ParallelExperts,
-    MoERouter,
-    DownsampleChain,
-    SequenceProcessor,
-)
+import torch.nn.functional as F
+from .dilated_stream import ParallelExperts
+from .downsample import DownsampleChain
+from .mamba_block import SequenceProcessor
+from .moe import MoERouter
 
 
 class Timback(nn.Module):
@@ -25,7 +24,7 @@ class Timback(nn.Module):
         self.t_ssm = SequenceProcessor(num_features * 2, state_dimension)
         self.z_out_proj = nn.Linear(num_features * 2, num_features)
 
-        fusion_in = 8 + 16 + 32 + num_features + state_dimension
+        fusion_in = 8 + 16 + 32 + num_features + num_features + state_dimension
         fusion_hidden = min(128, fusion_in)
         self.fusion = nn.Sequential(
             nn.Linear(fusion_in, fusion_hidden),
@@ -33,6 +32,8 @@ class Timback(nn.Module):
         )
 
         self.router = MoERouter(fusion_hidden, num_experts)
+
+        self.grid_proj = nn.Linear(num_features * 16, num_features)
 
         if dilation_rates is None:
             dilation_rates = [1, 2, 4, 8]
@@ -72,20 +73,20 @@ class Timback(nn.Module):
         z_c2 = c2.mean(dim=(2, 3))
         z_c3 = c3.mean(dim=(2, 3))
         z_c4 = c4.mean(dim=(2, 3))
-        z_c5 = c5.mean(dim=(2, 3))
+        z_c5 = self.grid_proj(F.adaptive_avg_pool2d(c5, 4).flatten(1))
 
         diff = z_c5 - self.prev_z_c5.detach()
         ssm_in = torch.cat([z_c5, diff], dim=-1).unsqueeze(1)
         out_t, self._t_state = self.t_ssm(ssm_in, self._t_state)
         z_out = self.z_out_proj(out_t[:, -1, :])
 
-        self.prev_z_c5 = z_out.detach()
-        return z_c2, z_c3, z_c4, z_out, self._t_state
+        self.prev_z_c5 = z_c5.detach()
+        return z_c2, z_c3, z_c4, z_c5, z_out, self._t_state
 
     def forward(self, x: torch.Tensor):
-        z_c2, z_c3, z_c4, z_out, h_t = self.forward_ssm_ictcp(x)
+        z_c2, z_c3, z_c4, z_c5, z_out, h_t = self.forward_ssm_ictcp(x)
 
-        router_in = torch.cat([z_c2, z_c3, z_c4, z_out, h_t], dim=-1)
+        router_in = torch.cat([z_c2, z_c3, z_c4, z_c5, z_out, h_t], dim=-1)
         router_in = self.fusion(router_in)
 
         idx, weights, logits = self.router(router_in, x, k=self.n_active, threshold=self.routing_threshold)

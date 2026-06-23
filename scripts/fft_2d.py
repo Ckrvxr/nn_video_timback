@@ -113,7 +113,7 @@ def save_side_by_side(mags: dict[str, np.ndarray], output_path: str,
 def main():
     parser = argparse.ArgumentParser(
         description='Extract one frame → generate high-quality Lanczos downscales 2x/4x → 2D FFT')
-    parser.add_argument('input', type=str, help='Input video path')
+    parser.add_argument('input', nargs='+', help='Input video path')
     parser.add_argument('-f', '--frame', type=float, default=None,
                         help='Time in seconds (default: 1%% into video)')
     parser.add_argument('-o', '--output', type=str, default=None,
@@ -126,9 +126,9 @@ def main():
                         help='Also save raw complex spectrum as .npy')
     args = parser.parse_args()
 
-    input_path = Path(args.input)
+    input_path = Path(' '.join(args.input))
     if not input_path.exists():
-        print(f'File not found: {args.input}')
+        print(f'File not found: {input_path}')
         sys.exit(1)
 
     print(f'Probing {input_path.name}...')

@@ -2,7 +2,7 @@ from tests.helpers import mock_triton
 mock_triton()
 
 import torch
-from models.components.moe import MoERouter
+from components.moe import MoERouter
 
 
 def test_moe_router_flat_gradients():
