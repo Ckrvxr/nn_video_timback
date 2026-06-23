@@ -17,17 +17,10 @@ from utils.training import cli
 class DummyModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv = nn.Conv2d(3, 3, kernel_size=1).half()
-        self._balancing_loss = torch.tensor(0.0, requires_grad=True)
+        self.conv = nn.Conv2d(9, 3, kernel_size=1)
 
-    def train(self, mode=True):
-        pass
-
-    def forward(self, x, **kwargs):
-        return self.conv(x)
-
-    def reset_state(self, batch_size, device):
-        pass
+    def forward(self, x):
+        return self.conv(x.float())
 
 
 @patch('utils.training.setup.create_dataloader')
@@ -56,19 +49,13 @@ def test_multi_dataset_sequential(
             'validation_num_workers': 2,
         },
         'model_architecture': {
-            'model_name': 'timback',
-            'num_features': 64,
-            'state_dimension': 32,
-            'num_features_stream': 2,
-            'num_experts': 100,
-            'n_active': 4,
-            'dilation_rates': [1, 2, 4, 32],
+            'model_name': 'pure_cnn',
+            'base_ch': 32,
         },
         'training_settings': {
             'batch_size': 4,
             'num_epochs': 1,
-            'learning_rate': 2e-4,
-            'min_learning_rate': 1e-6,
+            'lr': {'warmup_peak': 2e-4, 'warmup_epochs': 0, 'true_peak': 2e-4, 'min': 1e-6},
             'weight_decay': 1e-4,
             'adam_beta1': 0.9,
             'adam_beta2': 0.99,
@@ -133,21 +120,20 @@ def test_pause_and_exit_triggers():
                 'batch_size': 2,
             },
             'model_architecture': {
-                'model_name': 'timback',
-                'num_experts': 100,
-                'n_active': 4,
+                'model_name': 'pure_cnn',
+                'base_ch': 32,
             },
             'dataset': {
-                'num_frames': 5,
+                'num_frames': 3,
                 'sequential_mode': False,
             }
         }
 
         batches = [
-            {'lr_frames': torch.zeros(2, 5, 3, 32, 32), 'hr': torch.zeros(2, 3, 32, 32)},
-            {'lr_frames': torch.zeros(2, 5, 3, 32, 32), 'hr': torch.zeros(2, 3, 32, 32)},
-            {'lr_frames': torch.zeros(2, 5, 3, 32, 32), 'hr': torch.zeros(2, 3, 32, 32)},
-            {'lr_frames': torch.zeros(2, 5, 3, 32, 32), 'hr': torch.zeros(2, 3, 32, 32)},
+            {'lr_frames': torch.zeros(2, 3, 3, 32, 32), 'hr': torch.zeros(2, 3, 32, 32)},
+            {'lr_frames': torch.zeros(2, 3, 3, 32, 32), 'hr': torch.zeros(2, 3, 32, 32)},
+            {'lr_frames': torch.zeros(2, 3, 3, 32, 32), 'hr': torch.zeros(2, 3, 32, 32)},
+            {'lr_frames': torch.zeros(2, 3, 3, 32, 32), 'hr': torch.zeros(2, 3, 32, 32)},
         ]
 
         class ControlDataLoader:
@@ -172,7 +158,7 @@ def test_pause_and_exit_triggers():
 
         def criterion(pred, target):
             loss_val = torch.mean((pred - target) ** 2)
-            return {'total': loss_val, 'moe': torch.tensor(0.0, requires_grad=True)}
+            return {'total': loss_val}
 
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
         device = 'cpu'

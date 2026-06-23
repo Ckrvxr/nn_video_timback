@@ -29,19 +29,8 @@ def val_dir():
 
 
 @pytest.fixture
-def small_timback(device):
-    from components import Timback
-    model = Timback(
-        num_features=16, state_dimension=8, num_features_stream=2,
-        num_experts=4, n_active=2,
-    ).to(device)
-    model.eval()
-    return model
-
-
-@pytest.fixture
 def composite_loss(device):
     from utils.training.losses.composite import CompositeLoss
     return CompositeLoss({
         'charbonnier': 1.0, 'wavelet': 0.5, 'sobel': 0.05, 'fft': 0.1,
-    }, device=device)
+    })

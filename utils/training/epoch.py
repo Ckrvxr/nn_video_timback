@@ -1,4 +1,5 @@
 import time
+from collections import deque
 from pathlib import Path
 
 import torch
@@ -10,11 +11,7 @@ from utils.memory import gpu_low, get_memory_manager
 
 from . import cli
 from .cli import check_memory
-from .step import (
-    sam_first_pass, sam_second_pass, standard_optimizer_step,
-    log_expert_utilization,
-)
-from .validate import validate
+from .step import standard_optimizer_step
 
 
 def check_pause_exit_signals(run_dir: Path | None) -> bool:
@@ -68,12 +65,13 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     total_loss = 0.0
     n_batches = len(loader)
     n_samples = n_batches * config['training_settings']['batch_size']
-    running_losses: dict[str, float] = {}
+    running_losses: dict[str, deque] = {}
 
     training_cfg = config['training_settings']
     model_cfg = config['model_architecture']
     dataset_cfg = config['dataset']
     logging_cfg = config.get('logging_settings', {})
+    loss_window = logging_cfg.get('loss_window', 100)
     log_interval = logging_cfg.get('log_interval', 50)
 
     grad_accum = training_cfg.get('gradient_accumulation_steps', 1)
@@ -88,15 +86,15 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
     max_vram_ratio = memory_cfg.get('max_vram_ratio', 0.5)
     mem_manager = get_memory_manager(max_ram_ratio, max_vram_ratio)
 
-    model_name = model_cfg.get('model_name', 'hyper_fixer')
-    is_timback = model_name == 'timback'
-    sequential = dataset_cfg.get('sequential_mode', False) and is_timback
-    last_idx = dataset_cfg['num_frames'] - 1
-    expert_counts = torch.zeros(model_cfg.get('num_experts', 100), device='cpu')
-    use_sam = training_cfg.get('enable_sam', False)
+    is_pure_cnn = model_cfg.get('model_name', 'hyper_fixer') == 'pure_cnn'
 
-    if is_timback:
-        model.reset_state(bs or 1, device)
+    _loss_key_map = {'charbonnier': 'char', 'temporal_consistency': 'temporal'}
+    _postfix_order = []
+    for name, w in config.get('loss_weights', {}).items():
+        if w == 0.0:
+            continue
+        mapped = _loss_key_map.get(name, name)
+        _postfix_order.append(mapped)
 
     pbar = tqdm(total=n_samples, desc="Training", unit="sample", leave=False, miniters=10)
     t_batch_start = time.perf_counter()
@@ -109,56 +107,16 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
         lr = batch_yuv_to_ictcp(batch['lr_frames'], device)
         hr = batch_yuv_to_ictcp(batch['hr'], device)
 
-        def run_forward():
-            moe_weight = config['loss_weights'].get('moe', 0.01)
-            if sequential:
-                model.reset_state(lr.size(0), device)
-
-                for t in range(lr.size(1)):
-                    if t == last_idx:
-                        pred = model(lr[:, t].to(memory_format=torch.channels_last))
-                        loss_dict = criterion(pred, hr.to(memory_format=torch.channels_last))
-                        loss_dict['moe'] = model._balancing_loss * moe_weight if getattr(model, '_balancing_loss', None) is not None else torch.tensor(0.0, device=device)
-                        if hasattr(model, '_balancing_loss'):
-                            model._balancing_loss = None
-                        loss_dict['total'] = loss_dict['total'] + loss_dict['moe']
-                        loss = loss_dict['total'] / grad_accum
-                    else:
-                        with torch.no_grad():
-                            model.forward_ssm_ictcp(lr[:, t].to(memory_format=torch.channels_last))
-
-                if hasattr(model, '_last_expert_idx'):
-                    idx_flat = model._last_expert_idx.cpu().flatten()
-                    valid = idx_flat >= 0
-                    if valid.any():
-                        expert_counts.index_add_(0, idx_flat[valid],
-                                                 torch.ones_like(idx_flat[valid], dtype=torch.float))
-                model._t_state = model._t_state.detach()
-
-            else:
-                model.reset_state(lr.size(0), device)
-                pred = model(lr[:, last_idx].to(memory_format=torch.channels_last))
-                loss_dict = criterion(pred, hr.to(memory_format=torch.channels_last))
-                loss_dict['moe'] = model._balancing_loss * moe_weight if getattr(model, '_balancing_loss', None) is not None else torch.tensor(0.0, device=device)
-                if hasattr(model, '_balancing_loss'):
-                    model._balancing_loss = None
-                loss_dict['total'] = loss_dict['total'] + loss_dict['moe']
-                loss = loss_dict['total'] / grad_accum
-                if hasattr(model, '_last_expert_idx'):
-                    idx_flat = model._last_expert_idx.cpu().flatten()
-                    valid = idx_flat >= 0
-                    if valid.any():
-                        expert_counts.index_add_(0, idx_flat[valid],
-                                                 torch.ones_like(idx_flat[valid], dtype=torch.float))
-            return loss, loss_dict
-
-        if use_sam and is_timback and hasattr(model, '_t_state') and model._t_state is not None:
-            saved_state = model._t_state.clone()
-        else:
-            saved_state = None
-
         with torch.amp.autocast(device_type='cuda', enabled=scaler is not None):
-            loss, loss_dict = run_forward()
+            if is_pure_cnn:
+                x = lr.reshape(lr.size(0), -1, lr.size(3), lr.size(4)).to(memory_format=torch.channels_last)
+                pred = model(x)
+                loss_dict = criterion(pred, hr.to(memory_format=torch.channels_last))
+            else:
+                last = lr.size(1) - 1
+                pred = model(lr[:, last-2], lr[:, last-1], lr[:, last])
+                loss_dict = criterion(pred, hr.to(memory_format=torch.channels_last))
+            loss = loss_dict['total'] / grad_accum
 
         if scaler is not None:
             scaler.scale(loss).backward()
@@ -167,20 +125,12 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
 
         is_last_accum = ((batch_idx + 1) % grad_accum == 0) or (batch_idx == n_batches - 1)
         if is_last_accum:
-            if use_sam:
-                moe_weight = sam_first_pass(model, optimizer, scaler, config, run_forward)
-                if moe_weight is not None:
-                    sam_second_pass(model, optimizer, scaler, clip_grad, run_forward, saved_state)
-            else:
-                standard_optimizer_step(model, optimizer, scaler, clip_grad)
+            standard_optimizer_step(model, optimizer, scaler, clip_grad)
 
         batch_loss = loss_dict['total'].item()
         total_loss += batch_loss
         for k, v in loss_dict.items():
-            running_losses[k] = running_losses.get(k, 0.0) + v.item()
-
-        if (batch_idx + 1) % log_interval == 0:
-            log_expert_utilization(expert_counts, loss_dict, batch_loss, optimizer, epoch, n_epochs, batch_idx, n_batches)
+            running_losses.setdefault(k, deque(maxlen=loss_window)).append(v.item())
 
         t_now = time.perf_counter()
         batch_time = t_now - t_batch_start
@@ -191,13 +141,14 @@ def train_epoch(model, loader, criterion, optimizer, device, config, scaler=None
 
         samples_sec = bs / batch_time if batch_time > 0 else 0
 
-        _postfix_order = ['ms_ssim', 'gmsd', 'haarpsi', 'fft', 'rgb', 'char', 'moe']
-        count = batch_idx + 1
-        _postfix_parts = [f"loss={running_losses['total'] / count:.6f}"]
+        def avg_loss(name):
+            d = running_losses.get(name)
+            return sum(d) / len(d) if d else 0.0
+        _postfix_parts = [f"loss={avg_loss('total'):.6f}"]
         for name in _postfix_order:
-            val = running_losses.get(name)
-            if val is not None:
-                _postfix_parts.append(f"{name}={val / count:.6f}")
+            val = avg_loss(name)
+            if val != 0.0:
+                _postfix_parts.append(f"{name}={val:.6f}")
         _postfix_parts.append(f"lr={optimizer.param_groups[0]['lr']:.2e}")
         pbar.set_postfix_str("  ".join(_postfix_parts))
         pbar.update(bs)

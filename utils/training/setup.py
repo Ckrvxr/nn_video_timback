@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 import torch.optim as optim
 
-from components import Timback
+from components import RealTimeUNet4K_PureCNN
 from utils.console import console, section, sub_section, metric, divider
 from utils.data.dataset import create_dataloader
 from utils.training.losses.composite import CompositeLoss
@@ -21,15 +21,9 @@ def build_model_and_optimizer(config, device):
 
     section("Training Setup")
 
-    if model_name == 'timback':
-        model = Timback(
-            num_features=model_cfg.get('num_features', 16),
-            state_dimension=model_cfg.get('state_dimension', 32),
-            num_features_stream=model_cfg.get('num_features_stream', 2),
-            num_experts=model_cfg.get('num_experts', 100),
-            n_active=model_cfg.get('n_active', 4),
-            dilation_rates=model_cfg.get('dilation_rates', [1, 2, 4, 32]),
-            routing_threshold=model_cfg.get('routing_threshold', 1.0),
+    if model_name == 'pure_cnn':
+        model = RealTimeUNet4K_PureCNN(
+            base_ch=model_cfg.get('base_ch', 32),
         ).to(device, memory_format=torch.channels_last)
 
     sub_section("Model")
@@ -52,7 +46,7 @@ def build_model_and_optimizer(config, device):
 
     sub_section("Training")
     if 'schedule' in config:
-        config['loss_weights'] = config['schedule'][-1]['weights'].copy()
+        config['loss_weights'] = config['schedule'][0]['weights'].copy()
     else:
         metric("Loss Weights", str(config['loss_weights']))
     metric("Batch Size", str(training_cfg['batch_size']))
@@ -65,7 +59,6 @@ def build_model_and_optimizer(config, device):
     metric("Epochs", str(training_cfg['num_epochs']))
     metric("Mixed Precision", str(training_cfg.get('use_mixed_precision', False)))
     metric("SAM", str(training_cfg.get('enable_sam', False)))
-    metric("MoE Weight", str(config['loss_weights'].get('moe', 0.01)))
 
     criterion = CompositeLoss(config['loss_weights'])
 

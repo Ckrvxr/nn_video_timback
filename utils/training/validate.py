@@ -6,7 +6,7 @@ from utils.evaluation.metrics import calculate_psnr_batch, calculate_ssim_batch
 
 @torch.no_grad()
 def validate(model, val_loader, device, num_vmaf_samples=0, baseline=False):
-    from components import Timback
+    from components import RealTimeUNet4K_PureCNN
 
     model.eval()
     total_psnr = 0.0
@@ -14,7 +14,7 @@ def validate(model, val_loader, device, num_vmaf_samples=0, baseline=False):
     total_fpsnr = 0.0
     n = 0
     n_vmaf = 0
-    is_timback = isinstance(model, Timback)
+    is_pure_cnn = isinstance(model, RealTimeUNet4K_PureCNN)
 
     for batch in val_loader:
         lr = batch_yuv_to_ictcp(batch['lr_frames'], device)
@@ -23,9 +23,9 @@ def validate(model, val_loader, device, num_vmaf_samples=0, baseline=False):
         if baseline:
             pred_yuv = ictcp_to_yuv(lr[:, lr.size(1) - 1])
         else:
-            if is_timback:
-                model.reset_state(lr.size(0), device)
-                pred = model(lr[:, lr.size(1) - 1].float().to(memory_format=torch.channels_last))
+            if is_pure_cnn:
+                x = lr.reshape(lr.size(0), -1, lr.size(3), lr.size(4)).float().to(memory_format=torch.channels_last)
+                pred = model(x)
             else:
                 last = lr.size(1) - 1
                 pred = model(lr[:, last-2], lr[:, last-1], lr[:, last])

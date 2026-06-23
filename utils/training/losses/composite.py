@@ -9,6 +9,7 @@ from utils.training.losses.fft import FFTLoss
 from utils.training.losses.ms_ssim import MSSSIMLoss
 from utils.training.losses.gmsd import GMSDLoss
 from utils.training.losses.haarpsi import HaarPSILoss
+from utils.training.losses.sobel import SobelLoss
 
 
 class CompositeLoss(nn.Module):
@@ -21,6 +22,7 @@ class CompositeLoss(nn.Module):
         self.w_ms_ssim = config.get('ms_ssim', 0.0)
         self.w_gmsd = config.get('gmsd', 0.0)
         self.w_haarpsi = config.get('haarpsi', 0.0)
+        self.w_sobel = config.get('sobel', 0.0)
 
         self.char = CharbonnierLoss()
         self.temporal = TemporalConsistencyLoss(self.w_temp)
@@ -29,6 +31,7 @@ class CompositeLoss(nn.Module):
         self.ms_ssim = MSSSIMLoss()
         self.gmsd = GMSDLoss()
         self.haarpsi = HaarPSILoss()
+        self.sobel = SobelLoss()
 
     def _compute_conditional_loss(self, weight: float, loss_fn, *args, 
                                    condition: bool = True, **kwargs) -> torch.Tensor:
@@ -65,6 +68,7 @@ class CompositeLoss(nn.Module):
         losses['ms_ssim'] = self._compute_conditional_loss(self.w_ms_ssim, self.ms_ssim, pred, target, condition=not _vram_low)
         losses['gmsd'] = self._compute_conditional_loss(self.w_gmsd, self.gmsd, pred, target, condition=not _vram_low)
         losses['haarpsi'] = self._compute_conditional_loss(self.w_haarpsi, self.haarpsi, pred, target, condition=not _vram_low)
+        losses['sobel'] = self._compute_conditional_loss(self.w_sobel, self.sobel, pred, target, condition=not _vram_low)
         
         losses['total'] = sum(losses.values())
         return losses
@@ -78,6 +82,7 @@ class CompositeLoss(nn.Module):
             'ms_ssim': 'w_ms_ssim',
             'gmsd': 'w_gmsd',
             'haarpsi': 'w_haarpsi',
+            'sobel': 'w_sobel',
         }
         for k, v in weights.items():
             if k in weight_map:

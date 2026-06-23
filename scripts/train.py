@@ -26,7 +26,8 @@ from utils.training.cli import EXIT_FLAG, RUN_DIR, sigint_handler, parse_args
 from utils.training.io import start_io_worker, stop_io_worker, save_checkpoint
 from utils.training.signals import check_run_signals
 from utils.training.schedule import get_epoch_weights, log_validation
-from utils.training.epoch import train_epoch, validate
+from utils.training.epoch import train_epoch
+from utils.training.validate import validate
 from utils.training.setup import (
     build_model_and_optimizer, build_scheduler, load_checkpoint,
     build_dataloaders, compute_baseline,
