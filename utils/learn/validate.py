@@ -1,14 +1,21 @@
-"""Model validation — YUV domain via ffmpeg (consistent path for pred & ref)."""
+"""Model validation — YUV domain via ffmpeg (consistent path for pred & ref).
+
+PSNR/SSIM from 12-bit rawvideo comparison.  VMAF from ICtCp→RGB→8-bit PNG
+(old code path) since libvmaf expects SDR content.
+"""
 
 import gc
 import os
+import re
+import subprocess
 import tempfile
 from pathlib import Path
 
 import jax
 import numpy as np
+from PIL import Image
 
-from utils.colorspace import ictcp_to_yuv_np
+from utils.colorspace import ictcp_to_yuv, ictcp_to_yuv_np, yuv_to_rgb
 from utils.console import console
 from utils.data.mkv_loader import _decode_clip
 from utils.evaluation.ffmpeg_metrics import ffmpeg_metrics
@@ -29,9 +36,57 @@ def _probe(path: Path) -> tuple[int, int, float]:
     return w, h, fps
 
 
+def _vmaf_8bit_png(pred_ictcp: np.ndarray, target_ictcp: np.ndarray) -> float:
+    """VMAF via ICtCp → YUV → RGB (linear matrix) → uint8 PNG → ffmpeg libvmaf.
+
+    Matches the old code's VMAF path: libvmaf expects 8-bit SDR input.
+    """
+    # ICtCp → YUV float32 [-1, 1] → RGB float32 [-1, 1]
+    pred_yuv = np.array(ictcp_to_yuv(pred_ictcp))
+    target_yuv = np.array(ictcp_to_yuv(target_ictcp))
+    pred_rgb = np.array(yuv_to_rgb(pred_yuv))
+    target_rgb = np.array(yuv_to_rgb(target_yuv))
+
+    # [-1, 1] → uint8
+    pred_u8 = ((pred_rgb + 1) * 127.5).clip(0, 255).astype(np.uint8)
+    target_u8 = ((target_rgb + 1) * 127.5).clip(0, 255).astype(np.uint8)
+
+    # Take first frame, ensure HWC layout
+    if pred_u8.ndim == 4:
+        pred_u8, target_u8 = pred_u8[0], target_u8[0]
+    if pred_u8.shape[0] in (1, 3):
+        pred_u8 = pred_u8.transpose(1, 2, 0)
+        target_u8 = target_u8.transpose(1, 2, 0)
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        ref_path = os.path.join(tmpdir, 'ref.png')
+        pred_path = os.path.join(tmpdir, 'pred.png')
+        Image.fromarray(target_u8).save(ref_path)
+        Image.fromarray(pred_u8).save(pred_path)
+
+        result = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-i', ref_path, '-i', pred_path,
+             '-lavfi', 'libvmaf', '-f', 'null', '-'],
+            capture_output=True, text=True, timeout=30,
+        )
+        m = re.search(r'VMAF score:\s*([\d.]+)', result.stderr or result.stdout)
+        return float(m.group(1)) if m else 0.0
+    finally:
+        for f in [ref_path, pred_path]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        try:
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
+
+
 def validate_clip_yuv(jit_apply, params, lr_path, hr_path, batch_size=16):
-    """Run model on one clip, compare pred(ICtCp→YUV) vs HR.mkv via ffmpeg."""
-    lr_all, _ = _decode_clip(lr_path, hr_path)
+    """Run model on one clip: PSNR/SSIM from 12-bit YUV, VMAF from 8-bit PNG."""
+    lr_all, hr_all = _decode_clip(lr_path, hr_path)
     n_frames = lr_all.shape[0]
     if n_frames == 0:
         raise RuntimeError("Decoded clip has 0 frames")
@@ -46,19 +101,21 @@ def validate_clip_yuv(jit_apply, params, lr_path, hr_path, batch_size=16):
         pred_frames.append(pred)
     pred = np.concatenate(pred_frames, axis=0)
 
+    # PSNR / SSIM via 12-bit YUV rawvideo
     pred_yuv = ictcp_to_yuv_np(pred, bits=12)
-
     tmp = tempfile.NamedTemporaryFile(suffix='.yuv', delete=False)
     tmp.close()
     pred_yuv.tofile(tmp.name)
-
     try:
-        fps = 60  # placeholder; ffmpeg matches frame count regardless
         metrics = ffmpeg_metrics(hr_path, tmp.name, pix_fmt='yuv444p12le',
-                                 width=W, height=H, framerate=fps)
+                                 width=W, height=H, framerate=60)
     finally:
         if os.path.exists(tmp.name):
             os.unlink(tmp.name)
+
+    # VMAF via 8-bit PNG (libvmaf expects SDR content)
+    vmaf = _vmaf_8bit_png(pred, hr_all[:len(pred)])
+    metrics['vmaf'] = vmaf
 
     return metrics
 
