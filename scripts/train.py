@@ -73,14 +73,19 @@ def main():
     val_batch_size = dataset_cfg.get('validation_batch_size', 2)
     baseline = compute_baseline(config, val_clips, model, params, logging_cfg, run_dir, output_dir) if val_clips else {}
 
-    loss_weights = dict(config.get('loss_weights', {}))
+    schedule = config.get('schedule', [])
+    if schedule:
+        loss_weights = dict(schedule[0]['weights'])
+    else:
+        loss_weights = {'charbonnier': 1.0, 'rgb': 0.0, 'haarpsi': 0.0}
+    criterion.update_weights(loss_weights)
 
     try:
         exit_flag_ref = [EXIT_FLAG]
         for epoch in range(start_epoch, n_epochs):
-            wu_weights = get_epoch_weights(epoch, config.get('schedule', []), config['loss_weights'])
+            wu_weights = get_epoch_weights(epoch, schedule, loss_weights)
             if wu_weights is not None:
-                merged = dict(config['loss_weights'])
+                merged = dict(loss_weights)
                 merged.update(wu_weights)
                 criterion.update_weights(merged)
                 loss_weights = merged

@@ -18,28 +18,43 @@ def sigint_handler(signum, frame):
     if os.getpid() != MAIN_PID:
         return
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    # tqdm leaves the terminal in raw mode, preventing input() from working.
-    # Restore the terminal to cooked mode before prompting.
+
+    # tqdm leaves the terminal in raw mode, which breaks input().
+    # Reset to cooked / sane mode before prompting.
     try:
         import termios
         fd = sys.stdin.fileno()
-        termios.tcsetattr(fd, termios.TCSAFLUSH, termios.tcgetattr(fd))
+        termios.tcsetattr(fd, termios.TCSANOW, termios.tcgetattr(fd))
+    except Exception:
+        try:
+            os.system('stty sane 2>/dev/null')
+        except Exception:
+            pass
+    try:
+        from tqdm import tqdm
+        tqdm._instances.clear()
     except Exception:
         pass
-    print()
-    print("\033[1;33m═══ Training Paused (Ctrl+C detected) ═══\033[0m")
-    print("  \033[1;37m[c]\033[0m Continue training")
+
+    sys.stdout.write("\n")
+    sys.stdout.write("\033[1;33m═══ Training Paused (Ctrl+C detected) ═══\033[0m\n")
+    sys.stdout.write("  \033[1;37m[c]\033[0m Continue training\n")
     if RUN_DIR:
-        print("  \033[1;37m[p]\033[0m Pause (create \033[3m.pause\033[0m file, delete to resume)")
-    print("  \033[1;37m[s]\033[0m Save checkpoint and exit")
-    print("  \033[1;37m[e]\033[0m Exit immediately")
+        sys.stdout.write("  \033[1;37m[p]\033[0m Pause (create .pause file, delete to resume)\n")
+    sys.stdout.write("  \033[1;37m[s]\033[0m Save checkpoint and exit\n")
+    sys.stdout.write("  \033[1;37m[e]\033[0m Exit immediately\n")
+    sys.stdout.flush()
 
     while True:
         try:
             prompt = "\033[1;36mChoice [c/p/s/e]: \033[0m" if RUN_DIR else "\033[1;36mChoice [c/s/e]: \033[0m"
-            choice = input(prompt).strip().lower()
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+            choice = sys.stdin.readline().strip().lower()
+            if not choice:
+                continue
             if choice == 'c':
-                print("\033[32mResuming training...\033[0m")
+                sys.stdout.write("\033[32mResuming training...\033[0m\n")
                 if RUN_DIR:
                     pause_file = RUN_DIR / '.pause'
                     if pause_file.exists():
@@ -53,22 +68,23 @@ def sigint_handler(signum, frame):
                 pause_file = RUN_DIR / '.pause'
                 try:
                     pause_file.touch()
-                    print(f"\033[33mCreated '{pause_file}'. Training is now paused.\033[0m")
-                    print("To resume: delete the .pause file, or press Ctrl+C again.")
+                    sys.stdout.write(f"\033[33mCreated '{pause_file}'. Training is now paused.\033[0m\n")
+                    sys.stdout.write("To resume: delete the .pause file, or press Ctrl+C again.\n")
                 except Exception as e:
-                    print(f"\033[31mError creating pause file: {e}\033[0m")
+                    sys.stdout.write(f"\033[31mError creating pause file: {e}\033[0m\n")
                 signal.signal(signal.SIGINT, sigint_handler)
                 return
             elif choice == 's':
-                print("\033[33mGraceful exit requested. Will save checkpoint...\033[0m")
+                sys.stdout.write("\033[33mGraceful exit requested. Will save checkpoint...\033[0m\n")
                 EXIT_FLAG = True
                 signal.signal(signal.SIGINT, lambda s, f: os._exit(1))
                 return
             elif choice == 'e':
-                print("\033[31mExiting immediately...\033[0m")
+                sys.stdout.write("\033[31mExiting immediately...\033[0m\n")
                 os._exit(1)
+            sys.stdout.flush()
         except (EOFError, KeyboardInterrupt):
-            print("\n\033[31mExiting immediately...\033[0m")
+            sys.stdout.write("\n\033[31mExiting immediately...\033[0m\n")
             os._exit(1)
         except Exception:
             pass

@@ -32,10 +32,12 @@ training_settings:
   gradient_clipping_threshold: 5.0
   gradient_accumulation_steps: 1
 
-loss_weights:
-  charbonnier: 1.0
-  rgb: 0.1
-  haarpsi: 0.5
+schedule:
+  - epoch: 0
+    weights:
+      charbonnier: 1.0
+      rgb: 0.1
+      haarpsi: 0.5
 
 logging_settings:
   log_interval: 50

@@ -1,72 +1,105 @@
-"""Multi-worker threaded prefetcher — keeps GPU fed while CPU decodes."""
+"""Multi-worker threaded prefetcher — shared clip pool, parallel decode.
+
+A single producer shuffles all clips once, then ``n_workers`` threads decode
+clips in parallel and push individual frames to a shared frame queue.
+The main thread gathers frames and assembles batches of ``batch_size``.
+"""
 
 import queue
 import threading
+
+import numpy as np
+
+from utils.data.mkv_loader import _decode_clip, discover_clips
 
 
 _SENTINEL = object()
 
 
 class PrefetchIterator:
-    """Wraps a generator factory with multiple prefetch workers.
+    """Prefetches batches by decoding MKV clips in parallel worker threads.
 
-    Each worker independently calls ``factory()`` and pushes batches
-    to a shared queue.  Designed for finite training/validation generators.
-    Call ``close()`` when done to stop workers promptly.
+    Usage::
 
-    Usage:
-        def make_gen():
-            return load_mkv_batch(paths, bs, shuffle=True)
-
-        loader = PrefetchIterator(make_gen, n_workers=3, queue_size=6)
+        loader = PrefetchIterator(dataset_paths, batch_size=8, n_workers=3)
         for batch in loader:
+            lr, hr = batch
             ...
         loader.close()
     """
 
-    def __init__(self, factory, n_workers=3, queue_size=6):
-        self._queue = queue.Queue(maxsize=queue_size)
-        self._exceptions = queue.Queue(maxsize=n_workers)
+    def __init__(self, paths, batch_size, n_workers=3, frame_queue_size=300):
+        self._frame_queue = queue.Queue(maxsize=frame_queue_size)
+        self._exceptions = queue.Queue(maxsize=n_workers + 1)
         self._stop_event = threading.Event()
-        self._n_workers = n_workers
+        self._batch_size = batch_size
         self._sentinel_count = 0
-        self._factory = factory
-        self._threads = []
 
+        # ── Single global shuffle ──
+        clips = discover_clips(paths)
+        if not clips:
+            raise RuntimeError(f'No MKV clips found in: {paths}')
+        np.random.shuffle(clips)
+
+        self._clip_queue = queue.Queue()
+        for c in clips:
+            self._clip_queue.put(c)
         for _ in range(n_workers):
-            t = threading.Thread(target=self._worker, args=(factory,), daemon=True)
+            self._clip_queue.put(_SENTINEL)
+
+        # ── Start workers ──
+        self._threads = []
+        for _ in range(n_workers):
+            t = threading.Thread(target=self._worker, daemon=True)
             t.start()
             self._threads.append(t)
 
-    def _worker(self, factory):
+    def _worker(self):
+        """Pull clips from the shared queue, decode, push frames."""
         try:
-            gen = factory()
-            for item in gen:
-                if self._stop_event.is_set():
-                    break
-                self._queue.put(item)
+            while not self._stop_event.is_set():
+                item = self._clip_queue.get()
+                if item is _SENTINEL:
+                    # Signal end-of-frames for this worker.
+                    self._frame_queue.put(_SENTINEL)
+                    return
+                lr_all, hr_all = _decode_clip(item['lr_path'], item['hr_path'])
+                for i in range(len(lr_all)):
+                    if self._stop_event.is_set():
+                        return
+                    self._frame_queue.put((lr_all[i], hr_all[i]))
         except Exception as e:
             try:
                 self._exceptions.put(e)
             except queue.Full:
                 pass
-        finally:
-            self._queue.put(_SENTINEL)
+            self._frame_queue.put(_SENTINEL)
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        while True:
+        buf_lr = []
+        buf_hr = []
+
+        while len(buf_lr) < self._batch_size:
             self._check_exception()
-            item = self._queue.get()
+            item = self._frame_queue.get()
             if item is _SENTINEL:
                 self._sentinel_count += 1
-                if self._sentinel_count >= self._n_workers:
+                if self._sentinel_count >= len(self._threads):
                     self._check_exception()
-                    raise StopIteration
+                    if not buf_lr:
+                        raise StopIteration
+                    break
                 continue
-            return item
+            lr_frame, hr_frame = item
+            buf_lr.append(lr_frame[np.newaxis, ...])
+            buf_hr.append(hr_frame[np.newaxis, ...])
+
+        batch_lr = np.concatenate(buf_lr, axis=0)
+        batch_hr = np.concatenate(buf_hr, axis=0)
+        return batch_lr, batch_hr
 
     def _check_exception(self):
         try:
@@ -78,10 +111,14 @@ class PrefetchIterator:
 
     def _close_threads(self):
         self._stop_event.set()
-        # Drain the queue so blocked put() calls can return.
-        while not self._queue.empty():
+        while not self._frame_queue.empty():
             try:
-                self._queue.get_nowait()
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                break
+        while not self._clip_queue.empty():
+            try:
+                self._clip_queue.get_nowait()
             except queue.Empty:
                 break
         for t in self._threads:

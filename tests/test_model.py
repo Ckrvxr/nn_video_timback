@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import pytest
-from core import ResBlock, ICtCpNet, ICtCpNetV2, Fusion, HeavyBranch, LightBranch
+from core import ResBlock, ICtCpNetV2, Fusion, HeavyBranch, LightBranch
 
 
 # ── helpers ──
@@ -69,10 +69,6 @@ def compiled(request):
         elif name.startswith("ictcp_v2_"):
             scale = int(name.split("_")[2])
             m = ICtCpNetV2(scale=scale)
-            x = jax.random.normal(key, (1, 64, 64, 3))
-        elif name.startswith("ictcp_"):
-            scale = int(name.split("_")[1]) if len(name.split("_")) > 1 else 1
-            m = ICtCpNet(scale=scale)
             x = jax.random.normal(key, (1, 64, 64, 3))
         else:
             raise ValueError(name)
@@ -277,21 +273,4 @@ class TestICtCpNetV2Detail:
         assert out.shape == (1, 32, 32, 3)
         frame_center = x[..., 3:6]
         delta = out - frame_center
-        assert jnp.max(jnp.abs(delta)) < 1.0
-
-
-# ── Legacy ICtCpNet tests ──
-
-class TestICtCpNetLegacy:
-    def test_output_shape(self, compiled):
-        params, fn, _ = compiled("ictcp_1")
-        x = jax.random.normal(jax.random.PRNGKey(13), (1, 32, 32, 3))
-        out = fn(params, x)
-        assert out.shape == (1, 32, 32, 3)
-
-    def test_residual(self, compiled):
-        params, fn, _ = compiled("ictcp_1")
-        x = jax.random.normal(jax.random.PRNGKey(14), (1, 16, 16, 3))
-        out = fn(params, x)
-        delta = out - x
         assert jnp.max(jnp.abs(delta)) < 1.0

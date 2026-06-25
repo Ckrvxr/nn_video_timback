@@ -50,11 +50,16 @@ def build_model_and_optimizer(config):
     )
     opt_state = optimizer.init(params)
 
-    criterion = CompositeLoss(config['loss_weights'])
+    # Loss weights: from schedule if available, otherwise defaults.
+    schedule = config.get('schedule', [])
+    if schedule:
+        initial_weights = dict(schedule[0]['weights'])
+    else:
+        initial_weights = {'charbonnier': 1.0, 'rgb': 0.0, 'haarpsi': 0.0}
+    criterion = CompositeLoss(initial_weights)
 
     sub_section("Training")
-    if 'schedule' not in config:
-        metric("Loss Weights", str({k: f'{v:.8f}' for k, v in config['loss_weights'].items()}))
+    metric("Loss Weights", str({k: f'{v:.8f}' for k, v in initial_weights.items()}))
     metric("Batch Size", str(training_cfg['batch_size']))
     metric("Grad Accum", str(training_cfg.get('gradient_accumulation_steps', 1)))
     if lr_cfg:
@@ -110,17 +115,12 @@ def load_checkpoint(args, params, opt_state):
 def build_dataloaders(config):
     dataset_cfg = config['dataset']
     training_cfg = config['training_settings']
-    model_cfg = config.get('model_architecture', {})
 
     sub_section("Data")
     metric("Training", f"{len(dataset_cfg['dataset_paths'])} sources")
 
-    from utils.data.mkv_loader import discover_clips, load_mkv_batch
+    from utils.data.mkv_loader import discover_clips
     from utils.data.prefetch import PrefetchIterator
-
-    frames = model_cfg.get('multi_frame', False) * 2 + 1  # 1 or 3
-    if frames > 1:
-        metric("Multi-frame", f"{frames} frames")
 
     clips = discover_clips(dataset_cfg['dataset_paths'])
     total_frames = sum(c['n_frames'] for c in clips)
@@ -130,10 +130,7 @@ def build_dataloaders(config):
 
     def make_train_loader():
         return PrefetchIterator(
-            lambda: load_mkv_batch(
-                dataset_cfg['dataset_paths'], bs, shuffle=True, frames=frames,
-            ),
-            n_workers=3, queue_size=6,
+            dataset_cfg['dataset_paths'], batch_size=bs, n_workers=3, frame_queue_size=300,
         )
 
     val_clips = {}
