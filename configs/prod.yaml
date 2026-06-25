@@ -42,7 +42,7 @@ schedule:
   - epoch: 1+
     weights:
       haarpsi: 5.0
-      charbonnier: 0.5
+      charbonnier: 5.0
       rgb: 0.5
 
 logging_settings:

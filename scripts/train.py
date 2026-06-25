@@ -15,7 +15,7 @@ from utils.learn.metrics import composite_score
 from utils.learn.signals import check_run_signals
 from utils.learn.schedule import get_epoch_weights, log_validation
 from utils.learn.epoch import train_epoch
-from utils.learn.validate import validate
+from utils.learn.validate import validate_rgb
 from utils.learn.setup import (
     build_model_and_optimizer, build_lr_schedule, load_checkpoint,
     build_dataloaders, compute_baseline,
@@ -123,14 +123,14 @@ def main():
             if epoch % logging_cfg.get('validation_interval', 1) == 0:
                 section(f"Epoch {epoch+1}/{n_epochs}  —  loss={train_loss:.8f}")
                 for name, clips in val_clips.items():
+                    psnr = ssim = vmaf = float('nan')
                     try:
-                        psnr, ssim, vmaf = validate(model, params, clips,
-                                                    val_batch_size, run_dir, name)
-                        metrics[name] = {'psnr': psnr, 'ssim': ssim, 'vmaf': vmaf}
-                        log_validation(name, psnr, ssim, vmaf, baseline)
+                        psnr, ssim, vmaf = validate_rgb(model, params, clips,
+                                                        val_batch_size, name)
                     except Exception as e:
-                        console.error(f"Validation failed for {name}: {e}")
-                # Approximate final lr of the epoch
+                        console.error(f"RGB validation failed for {name}: {e}")
+                    metrics[name] = {'psnr': psnr, 'ssim': ssim, 'vmaf': vmaf}
+                    log_validation(name, psnr, ssim, vmaf, baseline)
                 avg_lr = float(lr_schedule_fn(epoch + n_batches / max(n_batches, 1)))
                 divider()
 
