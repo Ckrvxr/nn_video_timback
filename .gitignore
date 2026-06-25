@@ -1,6 +1,6 @@
-# pixi
-.pixi/
-pixi.lock
+# uv
+.venv/
+.python-version
 
 # Runs
 runs/
@@ -15,7 +15,6 @@ datasets/
 
 # OS
 .DS_Store
-Thumbs.db
 
 # Temp / Cache
 .mypy_cache/

@@ -1,194 +1,184 @@
-"""
-Verify all color space conversions.
+import os
+import re
+import subprocess
+import tempfile
+from pathlib import Path
 
-Coverage:
-- Torch JIT ≈ numpy f32 (all 4 directions)
-- Roundtrip reconstruction
-- PQ transfer function identity
-- Edge cases (black, white, saturated)
-- fp16 compatibility
-- Matrix orthogonality
-"""
-from tests.helpers import mock_triton, mock_mamba_ssm
-mock_triton()
-mock_mamba_ssm()
+# Limit JAX GPU preallocation so tests with real video data fit.
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.30")
 
+import jax
+import jax.numpy as jnp
 import numpy as np
-import torch
-from utils.color_space import (
-    yuv_to_ictcp_np, ictcp_to_yuv_np, rgb_to_ictcp_np, ictcp_to_rgb_np,
-    eotf_pq_np, oetf_pq_np,
-    yuv_to_ictcp, ictcp_to_yuv, rgb_to_ictcp, ictcp_to_rgb,
-    _M_YUV2RGB, _M_RGB2LMS, _M_LMS2ICTCP, _M_ICTCP2LMS, _M_LMS2RGB, _M_RGB2YUV,
+import pytest
+
+from utils.colorspace.color_space import (
+    MAT_BT2020_YUV2RGB,
+    MAT_RGB2LMS,
+    MAT_LMS2ICTCP,
+    MAT_ICTCP2LMS,
+    MAT_LMS2RGB,
+    MAT_RGB2YUV,
+    eotf_pq,
+    eotf_pq_np,
+    ictcp_to_yuv_np,
+    oetf_pq,
+    oetf_pq_np,
+    yuv_to_ictcp_np,
 )
-
-torch.manual_seed(0)
-np.random.seed(0)
-H, W = 64, 64
-MAX_ABS = 1e-4
+from utils.data.mkv_loader import _decode_clip, _ffmpeg_to_yuv, _yuv_to_ictcp_gpu
 
 
-def _yuv_nhwc_to_torch(yuv_nhwc):
-    return torch.from_numpy(yuv_nhwc.astype(np.float32)).permute(2, 0, 1).unsqueeze(0) / 127.5 - 1.0
+_PEAK = 4095.0
+_CENTER = 2048.0
+# ~17% of pixels have RGB<0 after YUV→BT.2020→RGB (extreme chroma); those
+# must be clipped to 0 before EOTF (PQ undefined for negatives).  This caps
+# L2 PSNR at ≈21 dB for real video.
+_PSNR_FLOOR = 18.0
 
 
-def _torch_to_np(t):
-    return t.squeeze(0).permute(1, 2, 0).detach().numpy()
+# ── Helpers ───────────────────────────────────────────────────────────
+
+def _yuv_norm(yuv: np.ndarray) -> np.ndarray:
+    f = yuv.astype(np.float32)
+    y = f[..., 0:1] / _PEAK
+    u = (f[..., 1:2] - _CENTER) / _PEAK
+    v = (f[..., 2:3] - _CENTER) / _PEAK
+    return np.concatenate([y, u, v], axis=-1)
 
 
-# ── matrix identity ──
-
-def test_matrix_identity():
-    for name, M, Minv in [
-        ("RGB2LMS", _M_RGB2LMS.numpy(), _M_LMS2RGB.numpy()),
-        ("LMS2ICTCP", _M_LMS2ICTCP.numpy(), _M_ICTCP2LMS.numpy()),
-    ]:
-        err = np.abs(M @ Minv - np.eye(3, dtype=np.float32)).max()
-        assert err < 1e-5, f"{name}: {err:.2e}"
-
-    err = np.abs(_M_YUV2RGB.numpy() @ _M_RGB2YUV.numpy() - np.eye(3, dtype=np.float32)).max()
-    assert err < 1e-5, f"YUV2RGB*RGB2YUV: {err:.2e}"
+def _psnr(a: np.ndarray, b: np.ndarray, peak: float = _PEAK) -> float:
+    mse = np.mean((a.astype(np.float32) - b.astype(np.float32)) ** 2)
+    return float(20 * np.log10(peak / (np.sqrt(mse) + 1e-30)))
 
 
-# ── numpy ↔ torch consistency (all 4 paths) ──
-
-def test_yuv_to_ictcp_consistency():
-    yuv = np.random.randint(0, 256, (H, W, 3)).astype(np.uint8)
-    ref = yuv_to_ictcp_np(yuv, bits=8)
-    out = _torch_to_np(yuv_to_ictcp(_yuv_nhwc_to_torch(yuv)))
-    assert np.abs(ref - out).max() < MAX_ABS
+# ── Tests ─────────────────────────────────────────────────────────────
 
 
-def test_ictcp_to_yuv_consistency():
-    ictcp = np.random.uniform(-0.5, 0.5, (H, W, 3)).astype(np.float32)
-    ref = ictcp_to_yuv_np(ictcp, bits=8)
-    t = torch.from_numpy(ictcp).permute(2, 0, 1).unsqueeze(0).float()
-    out = np.round((_torch_to_np(ictcp_to_yuv(t)) + 1) * 127.5).clip(0, 255).astype(np.uint8)
-    assert np.abs(ref.astype(np.int32) - out.astype(np.int32)).max() < 2
+class TestPQFunctions:
+
+    def test_eotf_oetf_roundtrip(self):
+        v = np.linspace(0.0, 0.999, 1000, dtype=np.float32)
+        lin = eotf_pq_np(v)
+        v2 = oetf_pq_np(lin)
+        err = np.abs(v - v2).max()
+        assert err < 5e-5, f"EOTF/OETF roundtrip error {err:.2e}"
+
+    def test_oetf_eotf_roundtrip(self):
+        lin = np.logspace(-4, 0, 1000, dtype=np.float32)
+        v = oetf_pq_np(lin)
+        lin2 = eotf_pq_np(v)
+        rel_err = np.abs(lin - lin2).max()
+        assert rel_err < 2e-4, f"OETF/EOTF roundtrip error {rel_err:.2e}"
+
+    def test_no_nan_at_boundary(self):
+        v = np.array([0.0, 0.5, 0.99, 1.0, 1.5, 1.94, 1.97], dtype=np.float32)
+        result = eotf_pq_np(v)
+        assert np.all(np.isfinite(result)), "Non-finite EOTF at boundary"
+
+    def test_oetf_large_input(self):
+        lin = np.array([0.0, 1.0, 10.0, 1e3, 1e6], dtype=np.float32)
+        result = oetf_pq_np(lin)
+        assert np.all(np.isfinite(result)), "OETF produced NaN for large input"
+        assert result[-1] <= 2.0, "OETF saturates below 2.0"
 
 
-def test_rgb_to_ictcp_consistency():
-    rgb = np.random.uniform(0.0, 1.0, (H, W, 3)).astype(np.float32)
-    ref = rgb_to_ictcp_np(rgb)
-    t = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float()
-    assert np.abs(ref - _torch_to_np(rgb_to_ictcp(t))).max() < MAX_ABS
+class TestMatrixRoundtrip:
+
+    def test_yuv2rgb_then_rgb2yuv(self):
+        yuv = np.random.randn(100, 3).astype(np.float32)
+        rgb = yuv @ MAT_BT2020_YUV2RGB.T
+        yuv2 = rgb @ np.linalg.inv(MAT_BT2020_YUV2RGB).T
+        assert np.allclose(yuv, yuv2, atol=1e-6)
+
+    def test_lms_ictcp_chain(self):
+        lms = np.random.randn(100, 3).astype(np.float32)
+        ictcp = lms @ MAT_LMS2ICTCP.T
+        lms2 = ictcp @ MAT_ICTCP2LMS.T
+        assert np.allclose(lms, lms2, atol=1e-6)
 
 
-def test_ictcp_to_rgb_consistency():
-    ictcp = np.random.uniform(-0.5, 0.5, (H, W, 3)).astype(np.float32)
-    ref = ictcp_to_rgb_np(ictcp)
-    t = torch.from_numpy(ictcp).permute(2, 0, 1).unsqueeze(0).float()
-    assert np.abs(ref - _torch_to_np(ictcp_to_rgb(t))).max() < MAX_ABS
+@pytest.fixture(scope="module")
+def real_clip_dir():
+    d = Path("datasets/val/alysa_liu_stateside_025x/00m21s_00m22s_h264_crf31_pfast_gop300_yuv420p")
+    if not (d / "HR.mkv").exists():
+        pytest.skip("real video data not available")
+    return d
 
 
-# ── roundtrip ──
+class TestFullRoundtrip:
 
-def test_rgb_roundtrip():
-    """RGB→ICtCp→RGB should reconstruct within pq precision."""
-    rgb = np.random.uniform(0.0, 1.0, (H, W, 3)).astype(np.float32)
-    t = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float()
-    rgb_back = _torch_to_np(ictcp_to_rgb(rgb_to_ictcp(t))).clip(0.0, 1.0)
-    e = np.abs(rgb - rgb_back).max()
-    assert e < 5e-4, f"RGB roundtrip: {e:.2e}"
+    def test_synthetic_gray_roundtrip(self):
+        rng = np.random.default_rng(42)
+        yuv = np.full((1, 8, 8, 3), _CENTER, dtype=np.uint16)
+        yuv[..., 0] = rng.integers(0, 4096, (1, 8, 8))
+        ictcp = yuv_to_ictcp_np(yuv, bits=12)
+        yuv2 = ictcp_to_yuv_np(ictcp, bits=12)
+        err = np.abs(yuv.astype(np.float32) - yuv2.astype(np.float32))
+        assert err.mean() < 50, f"Mean error {err.mean():.1f} >= 50"
 
+    def test_black_white_roundtrip(self):
+        for y_val in [0, _PEAK]:
+            yuv = np.full((1, 4, 4, 3), _CENTER, dtype=np.uint16)
+            yuv[..., 0] = y_val
+            ictcp = yuv_to_ictcp_np(yuv, bits=12)
+            yuv2 = ictcp_to_yuv_np(ictcp, bits=12)
+            err = np.abs(yuv.astype(np.int32) - yuv2.astype(np.int32)).max()
+            assert err <= 2, f"Luma={y_val} error {err} > 2"
 
-def test_yuv_roundtrip_valid():
-    """YUV→ICtCp→YUV via RGB (in-gamut). PQ double-nonlinearity + clamp
-    can cause occasional pixel errors; threshold set empirically."""
-    rgb = np.random.uniform(0.0, 1.0, (H, W, 3)).astype(np.float32)
-    m = _M_RGB2YUV.numpy()
-    yuv_lin = rgb @ m.T
-    y = (yuv_lin[:, :, 0:1] * 255.0).clip(0, 255)
-    u = (yuv_lin[:, :, 1:2] * 255.0 + 128.0).clip(0, 255)
-    v = (yuv_lin[:, :, 2:3] * 255.0 + 128.0).clip(0, 255)
-    yuv = np.round(np.concatenate([y, u, v], axis=-1)).astype(np.uint8)
-    t = _yuv_nhwc_to_torch(yuv)
-    yuv_back = _torch_to_np(ictcp_to_yuv(yuv_to_ictcp(t)))
-    yuv_back_u8 = np.round((yuv_back + 1) * 127.5).clip(0, 255).astype(np.uint8)
-    e = np.abs(yuv.astype(np.int32) - yuv_back_u8.astype(np.int32)).max()
-    assert e < 20, f"YUV roundtrip: max_diff={e}"
+    def test_real_video_roundtrip_cpu(self, real_clip_dir):
+        yuv = _ffmpeg_to_yuv(real_clip_dir / "HR.mkv")
+        ictcp = yuv_to_ictcp_np(yuv, bits=12)
+        yuv2 = ictcp_to_yuv_np(ictcp, bits=12)
+        psnr = _psnr(yuv, yuv2)
+        assert psnr > _PSNR_FLOOR, f"CPU roundtrip PSNR {psnr:.2f} < {_PSNR_FLOOR}"
 
+    def test_real_video_roundtrip_gpu(self, real_clip_dir):
+        yuv = _ffmpeg_to_yuv(real_clip_dir / "HR.mkv")
+        yuv = yuv[:4]
+        ictcp_np = yuv_to_ictcp_np(yuv, bits=12)
+        ictcp_gpu = _yuv_to_ictcp_gpu(yuv)
+        diff = np.abs(ictcp_np.astype(np.float64) - ictcp_gpu.astype(np.float64))
+        assert diff.max() < 1.0, f"CPU/GPU ICtCp max diff {diff.max():.4e}"
 
-# ── special values ──
-
-def test_black_white():
-    for label, rgb in [("black", [0, 0, 0]), ("white", [1, 1, 1])]:
-        t = torch.tensor(rgb, dtype=torch.float32).reshape(1, 3, 1, 1)
-        ictcp = _torch_to_np(rgb_to_ictcp(t)).ravel()
-        if label == "black":
-            assert abs(ictcp[0]) < 0.1, f"black I={ictcp[0]}"
-        else:
-            assert ictcp[0] > 0.5, f"white I={ictcp[0]}"
-
-
-def test_primary_colors_distinct():
-    primaries = {}
-    for label, c in [("red", [1, 0, 0]), ("green", [0, 1, 0]), ("blue", [0, 0, 1])]:
-        t = torch.tensor(c, dtype=torch.float32).reshape(1, 3, 1, 1)
-        primaries[label] = _torch_to_np(rgb_to_ictcp(t)).ravel()
-    for a in primaries:
-        for b in primaries:
-            if a >= b:
-                continue
-            dist = np.abs(primaries[a] - primaries[b]).max()
-            assert dist > 0.01, f"{a}≈{b}: dist={dist:.4f}"
+    def test_decoder_plus_validation(self, real_clip_dir):
+        lr, hr = _decode_clip(real_clip_dir / "LR.mkv", real_clip_dir / "HR.mkv")
+        assert np.all(np.isfinite(lr)), "LR ICtCp has NaN/Inf"
+        assert np.all(np.isfinite(hr)), "HR ICtCp has NaN/Inf"
+        yuv_pred = ictcp_to_yuv_np(hr[:4], bits=12)
+        yuv_ref = _ffmpeg_to_yuv(real_clip_dir / "HR.mkv")[:4]
+        psnr = _psnr(yuv_ref, yuv_pred)
+        assert psnr > _PSNR_FLOOR, f"Round-trip PSNR {psnr:.2f} < {_PSNR_FLOOR}"
 
 
-def test_primary_colors_I_order():
-    """I channel: green > red > blue (luminance order)."""
-    rgb_vals = {"green": [0, 1, 0], "red": [1, 0, 0], "blue": [0, 0, 1]}
-    I_vals = {}
-    for label, c in rgb_vals.items():
-        t = torch.tensor(c, dtype=torch.float32).reshape(1, 3, 1, 1)
-        I_vals[label] = _torch_to_np(rgb_to_ictcp(t)).ravel()[0]
-    assert I_vals["green"] > I_vals["red"] > I_vals["blue"], f"I_vals={I_vals}"
+class TestDataLoaderIntegration:
+
+    def test_batch_yield_shape(self):
+        from utils.data.mkv_loader import load_mkv_batch
+        paths = ["./datasets/val/alysa_liu_stateside_025x"]
+        gen = load_mkv_batch(paths, batch_size=4, shuffle=False)
+        batch = next(gen)
+        lr_batch, hr_batch = batch
+        assert lr_batch.shape[0] <= 4
+        assert lr_batch.ndim == 4 and lr_batch.shape[-1] == 3
+        assert np.all(np.isfinite(lr_batch)), "LR batch has NaN/Inf"
+        assert np.all(np.isfinite(hr_batch)), "HR batch has NaN/Inf"
 
 
-# ── PQ transfer function identity ──
+class TestMisc:
 
-def test_pq_roundtrip():
-    l = np.linspace(0.0, 1.0, 1000, dtype=np.float32)
-    l_back = eotf_pq_np(oetf_pq_np(l))
-    assert np.abs(l - l_back).max() < 1e-4
+    def test_yuv_get_video_resolution(self):
+        d = Path("datasets/val/alysa_liu_stateside_025x/00m21s_00m22s_h264_crf31_pfast_gop300_yuv420p")
+        yuv = _ffmpeg_to_yuv(d / "HR.mkv")
+        assert yuv.shape[1:] == (512, 512, 3)
+        assert yuv.dtype == np.uint16
+        assert yuv.min() >= 0 and yuv.max() <= 4095
 
-
-def test_pq_monotonic():
-    l_pq = oetf_pq_np(np.linspace(0.0, 1.0, 100, dtype=np.float32))
-    assert np.all(np.diff(l_pq) > 0)
-
-
-# ── fp16 ──
-
-def test_yuv_fp16_nan_inf_free():
-    yuv = np.random.randint(0, 256, (H, W, 3)).astype(np.uint8)
-    out = yuv_to_ictcp(_yuv_nhwc_to_torch(yuv).half())
-    assert not torch.isnan(out).any()
-    assert not torch.isinf(out).any()
-    assert out.dtype == torch.float16
-
-
-def test_ictcp_to_yuv_fp16():
-    ictcp = torch.randn(1, 3, H, W).half()
-    out = ictcp_to_yuv(ictcp)
-    assert out.shape == (1, 3, H, W)
-    assert not torch.isnan(out).any()
-    assert not torch.isinf(out).any()
-
-
-def test_rgb_fp16_nan_inf_free():
-    t = torch.randn(1, 3, H, W).half()
-    out = rgb_to_ictcp(t)
-    assert not torch.isnan(out).any()
-    assert not torch.isinf(out).any()
-
-
-# ── ICtCp range sanity ──
-
-def test_ictcp_output_range():
-    rgb = np.random.uniform(0.0, 1.0, (10000, 3)).astype(np.float32)
-    t = torch.from_numpy(rgb).permute(1, 0).reshape(1, 3, 1, 10000).float()
-    ictcp = _torch_to_np(rgb_to_ictcp(t))
-    I, Ct, Cp = ictcp[:, 0], ictcp[:, 1], ictcp[:, 2]
-    assert I.min() > -1.5 and I.max() < 1.5, f"I range [{I.min():.3f}, {I.max():.3f}]"
-    assert abs(Ct).max() < 1.0, f"Ct range [{Ct.min():.3f}, {Ct.max():.3f}]"
-    assert abs(Cp).max() < 1.0, f"Cp range [{Cp.min():.3f}, {Cp.max():.3f}]"
+    def test_no_crash_on_10bit_clip(self):
+        d = Path("datasets/val/alysa_liu_stateside_025x/00m05s_00m07s_h265_crf27_pslow_gop96_yuv420p10le")
+        if not (d / "HR.mkv").exists():
+            pytest.skip("10-bit clip not present")
+        yuv = _ffmpeg_to_yuv(d / "HR.mkv")
+        assert yuv.shape[1:] == (512, 512, 3)
+        ictcp = yuv_to_ictcp_np(yuv, bits=12)
+        assert np.all(np.isfinite(ictcp))

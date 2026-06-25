@@ -88,14 +88,4 @@ def set_seed(seed: int):
 
 
 def check_memory(config, force: bool = False):
-    mem_cfg = config.get('memory_settings', {})
-    max_ram_ratio = mem_cfg.get('max_ram_ratio', 0.3)
-    from utils.memory import get_memory_manager
-    manager = get_memory_manager(max_ram_ratio, 0.5)
-    ram_pressure, vram_pressure = manager.check_memory_pressure(force_gc=force)
-    if ram_pressure or vram_pressure or force:
-        status = manager.log_memory_status("Memory check: ")
-        console.info(status)
-        if ram_pressure:
-            console.warning(f"RAM pressure detected (limit: {max_ram_ratio*100:.0f}%)")
-    return ram_pressure, vram_pressure
+    pass

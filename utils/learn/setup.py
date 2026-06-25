@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import optax
 
 from core import ICtCpNet, ICtCpNetV2
-from utils.console import section, sub_section, metric, divider
+from utils.console import console, section, sub_section, metric, divider
 from utils.loss.composite import CompositeLoss
 from utils.learn.validate import validate
 
@@ -45,21 +45,18 @@ def build_model_and_optimizer(config):
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(training_cfg.get('gradient_clipping_threshold', 1.0)),
-        optax.adamw(
-            learning_rate=opt_lr,
-            weight_decay=training_cfg.get('weight_decay', 0.01),
+        optax.scale_by_adam(
             b1=training_cfg.get('adam_beta1', 0.9),
             b2=training_cfg.get('adam_beta2', 0.999),
         ),
+        optax.add_decayed_weights(training_cfg.get('weight_decay', 0.01)),
     )
     opt_state = optimizer.init(params)
 
     criterion = CompositeLoss(config['loss_weights'])
 
     sub_section("Training")
-    if 'schedule' in config:
-        config['loss_weights'] = config['schedule'][0]['weights'].copy()
-    else:
+    if 'schedule' not in config:
         metric("Loss Weights", str(config['loss_weights']))
     metric("Batch Size", str(training_cfg['batch_size']))
     metric("Grad Accum", str(training_cfg.get('gradient_accumulation_steps', 1)))
@@ -136,10 +133,13 @@ def build_dataloaders(config):
     n_batches = max(total_frames // bs, 1)
     metric("Batches/epoch", str(n_batches))
 
-    _raw_factory = lambda: load_mkv_batch(
-        dataset_cfg['dataset_paths'], bs, shuffle=True, frames=frames,
-    )
-    train_loader = PrefetchIterator(_raw_factory, n_workers=3, queue_size=6)
+    def make_train_loader():
+        return PrefetchIterator(
+            lambda: load_mkv_batch(
+                dataset_cfg['dataset_paths'], bs, shuffle=True, frames=frames,
+            ),
+            n_workers=3, queue_size=6,
+        )
 
     val_clips = {}
     for vp in dataset_cfg.get('val_dataset_paths', []):
@@ -147,7 +147,7 @@ def build_dataloaders(config):
         clips = discover_clips([vp])
         val_clips[name] = clips
 
-    return train_loader, val_clips, n_batches
+    return make_train_loader, val_clips, n_batches
 
 
 def compute_baseline(config, val_clips, model, params, logging_cfg, run_dir, output_dir):
@@ -174,9 +174,13 @@ def compute_baseline(config, val_clips, model, params, logging_cfg, run_dir, out
         baseline = {}
         val_batch_size = dataset_cfg.get('validation_batch_size', 2)
         for name, clips in val_clips.items():
-            b_psnr, b_ssim, b_vmaf = validate(model, params, clips,
-                                              val_batch_size, run_dir, name,
-                                              baseline=True)
+            try:
+                b_psnr, b_ssim, b_vmaf = validate(model, params, clips,
+                                                  val_batch_size, run_dir, name,
+                                                  baseline=True)
+            except Exception as e:
+                console.error(f"Baseline failed for {name}: {e}")
+                b_psnr = b_ssim = b_vmaf = float('nan')
             baseline[name] = {'psnr': b_psnr, 'ssim': b_ssim, 'vmaf': b_vmaf}
             metric(name, f"psnr={b_psnr:.2f}  ssim={b_ssim:.4f}  vmaf={b_vmaf:.4f}")
         json.dump(baseline, open(baseline_path, 'w'))
