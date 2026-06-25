@@ -149,9 +149,9 @@ def ictcp_to_yuv_np(ictcp: np.ndarray, bits: int = 8) -> np.ndarray:
 
     peak = np.float32((1 << bits) - 1)
     center = np.float32(1 << (bits - 1))
-    yuv_n[..., 0] = np.clip(yuv_n[..., 0], 0.0, 1.0) * peak
-    yuv_n[..., 1] = np.clip(yuv_n[..., 1], -0.5, 0.5) * peak + center
-    yuv_n[..., 2] = np.clip(yuv_n[..., 2], -0.5, 0.5) * peak + center
+    yuv_n[..., 0] *= peak
+    yuv_n[..., 1] = yuv_n[..., 1] * peak + center
+    yuv_n[..., 2] = yuv_n[..., 2] * peak + center
     if bits > 8:
         return np.round(yuv_n).astype(np.uint16)
     return np.round(yuv_n).astype(np.uint8)

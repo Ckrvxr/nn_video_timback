@@ -1,25 +1,18 @@
-"""Model validation — RGB float32 domain (no YUV round-trip ceiling).
-
-Matches the old code's approach: convert ICtCp → YUV → RGB via exact linear
-matrices (no PQ curves, no clipping, no quantisation), then compute PSNR/SSIM
-in float32 RGB and VMAF from 8-bit PNG frames.
-"""
+"""Model validation — YUV domain via ffmpeg (consistent path for pred & ref)."""
 
 import gc
 import os
-import re
-import subprocess
 import tempfile
+from pathlib import Path
 
 import jax
-import jax.numpy as jnp
 import numpy as np
-from PIL import Image
 
-from utils.colorspace import ictcp_to_yuv, yuv_to_rgb
+from utils.colorspace import ictcp_to_yuv_np
 from utils.console import console
 from utils.data.mkv_loader import _decode_clip
-from utils.evaluation.metrics import calculate_psnr_batch, calculate_ssim_batch
+from utils.evaluation.ffmpeg_metrics import ffmpeg_metrics
+from utils.video_processor.probe_utils import get_video_resolution, probe_video
 
 
 def _release_jax_memory():
@@ -30,72 +23,20 @@ def _release_jax_memory():
         pass
 
 
-def _compute_vmaf_rgb(pred_rgb: np.ndarray, ref_rgb: np.ndarray, tmpdir: str | None = None) -> float:
-    """Compute VMAF from two RGB float32 [-1,1] frames via PNG screenshots.
-
-    Matches the old code's VMAF approach: RGB float32 → uint8 PNG → ffmpeg libvmaf.
-    """
-    pred_u8 = ((pred_rgb + 1) * 127.5).clip(0, 255).astype(np.uint8)
-    ref_u8 = ((ref_rgb + 1) * 127.5).clip(0, 255).astype(np.uint8)
-
-    if pred_u8.ndim == 4:
-        pred_u8 = pred_u8[0]
-        ref_u8 = ref_u8[0]
-    # PyAV/FFmpeg expects NHWC, yuv_to_rgb returns CHW → transpose
-    if pred_u8.ndim == 3 and pred_u8.shape[0] in (1, 3):
-        pred_u8 = pred_u8.transpose(1, 2, 0)
-        ref_u8 = ref_u8.transpose(1, 2, 0)
-
-    cleanup = False
-    if tmpdir is None:
-        tmpdir = tempfile.mkdtemp()
-        cleanup = True
-
-    ref_path = os.path.join(tmpdir, 'ref.png')
-    pred_path = os.path.join(tmpdir, 'pred.png')
-    Image.fromarray(ref_u8).save(ref_path)
-    Image.fromarray(pred_u8).save(pred_path)
-
-    cmd = [
-        'ffmpeg', '-hide_banner',
-        '-i', ref_path,
-        '-i', pred_path,
-        '-lavfi', 'libvmaf',
-        '-f', 'null', '-',
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        match = re.search(r'VMAF score:\s*([\d.]+)', result.stderr or result.stdout)
-        vmaf = float(match.group(1)) if match else 0.0
-    except Exception:
-        vmaf = 0.0
-
-    if cleanup:
-        for f in [ref_path, pred_path]:
-            try:
-                os.remove(f)
-            except OSError:
-                pass
-        try:
-            os.rmdir(tmpdir)
-        except OSError:
-            pass
-
-    return vmaf
+def _probe(path: Path) -> tuple[int, int, float]:
+    w, h = get_video_resolution(path)
+    fps, _ = probe_video(path)
+    return w, h, fps
 
 
-def validate_clip_rgb(jit_apply, params, lr_path, hr_path, batch_size=16):
-    """Run model on one clip, return RGB-domain PSNR/SSIM + VMAF.
-
-    1. Decode clip → ICtCp
-    2. Model forward → pred ICtCp
-    3. pred, hr → ictcp_to_yuv → yuv_to_rgb → float32 RGB
-    4. PSNR/SSIM from float32 RGB, VMAF from PNG frames
-    """
-    lr_all, hr_all = _decode_clip(lr_path, hr_path)
+def validate_clip_yuv(jit_apply, params, lr_path, hr_path, batch_size=16):
+    """Run model on one clip, compare pred(ICtCp→YUV) vs HR.mkv via ffmpeg."""
+    lr_all, _ = _decode_clip(lr_path, hr_path)
     n_frames = lr_all.shape[0]
     if n_frames == 0:
         raise RuntimeError("Decoded clip has 0 frames")
+
+    _, H, W = lr_all.shape[:3]
 
     pred_frames = []
     for i in range(0, n_frames, batch_size):
@@ -103,26 +44,27 @@ def validate_clip_rgb(jit_apply, params, lr_path, hr_path, batch_size=16):
         pred = np.array(jax.block_until_ready(jit_apply(params, batch)))
         pred = np.nan_to_num(pred, nan=0.0)
         pred_frames.append(pred)
-    pred_ictcp = np.concatenate(pred_frames, axis=0)
-    target_ictcp = hr_all[:len(pred_ictcp)]
+    pred = np.concatenate(pred_frames, axis=0)
 
-    # Convert to float32 RGB (linear YUV→RGB, no PQ/EOTF)
-    pred_yuv = np.array(ictcp_to_yuv(pred_ictcp))
-    target_yuv = np.array(ictcp_to_yuv(target_ictcp))
-    pred_rgb = np.array(yuv_to_rgb(pred_yuv))
-    target_rgb = np.array(yuv_to_rgb(target_yuv))
+    pred_yuv = ictcp_to_yuv_np(pred, bits=12)
 
-    psnr = float(calculate_psnr_batch(pred_rgb, target_rgb).mean())
-    ssim = float(calculate_ssim_batch(pred_rgb, target_rgb).mean())
+    tmp = tempfile.NamedTemporaryFile(suffix='.yuv', delete=False)
+    tmp.close()
+    pred_yuv.tofile(tmp.name)
 
-    # VMAF from first frame of the clip (PNG-based)
-    vmaf = _compute_vmaf_rgb(pred_rgb[:1], target_rgb[:1])
+    try:
+        fps = 60  # placeholder; ffmpeg matches frame count regardless
+        metrics = ffmpeg_metrics(hr_path, tmp.name, pix_fmt='yuv444p12le',
+                                 width=W, height=H, framerate=fps)
+    finally:
+        if os.path.exists(tmp.name):
+            os.unlink(tmp.name)
 
-    return {'psnr': psnr, 'ssim': ssim, 'vmaf': vmaf}
+    return metrics
 
 
-def validate_rgb(model, params, clips, batch_size, name):
-    """Primary validation: RGB float32 domain (matches old code)."""
+def validate(model, params, clips, batch_size, name):
+    """Validate across all clips: model output → YUV → ffmpeg vs HR.mkv."""
     jit_apply = jax.jit(lambda p, x: model.apply(p, x))
     total = {'psnr': 0.0, 'ssim': 0.0, 'vmaf': 0.0}
     n = 0
@@ -132,7 +74,7 @@ def validate_rgb(model, params, clips, batch_size, name):
     for clip in clips:
         for attempt_bs in [batch_size, 1]:
             try:
-                metrics = validate_clip_rgb(jit_apply, params,
+                metrics = validate_clip_yuv(jit_apply, params,
                                             clip['lr_path'], clip['hr_path'],
                                             batch_size=attempt_bs)
                 for k in total:
@@ -146,7 +88,7 @@ def validate_rgb(model, params, clips, batch_size, name):
                     console.warning(f"OOM validating {clip.get('clip_name', '?')}, retrying batch=1")
                     _release_jax_memory()
                     continue
-                console.error(f"RGB validation failed for {clip.get('clip_name', '?')}: {e}")
+                console.error(f"Validation failed for {clip.get('clip_name', '?')}: {e}")
                 break
         _release_jax_memory()
 
@@ -156,32 +98,9 @@ def validate_rgb(model, params, clips, batch_size, name):
     return total['psnr'] / n, total['ssim'] / n, total['vmaf'] / n
 
 
-def validate_ictcp(model, params, clips, batch_size, name):
-    """Secondary validation: ICtCp float32 domain (training loss space, no ceiling)."""
-    jit_apply = jax.jit(lambda p, x: model.apply(p, x))
-    total_psnr = 0.0
-    total_ssim = 0.0
-    n = 0
-
-    _release_jax_memory()
-
-    for clip in clips:
-        try:
-            lr_all, hr_all = _decode_clip(clip['lr_path'], clip['hr_path'])
-            n_frames = lr_all.shape[0]
-            pred_frames = []
-            for i in range(0, n_frames, batch_size):
-                batch = lr_all[i:i + batch_size]
-                pred = jax.block_until_ready(jit_apply(params, batch))
-                pred_frames.append(pred)
-            pred = jnp.concatenate(pred_frames, axis=0)
-            target = jnp.array(hr_all, dtype=jnp.float32)
-            total_psnr += float(calculate_psnr_batch(pred, target).mean())
-            total_ssim += float(calculate_ssim_batch(pred, target).mean())
-            n += 1
-        except Exception as e:
-            console.error(f"ICtCp validation failed for {clip.get('clip_name', '?')}: {e}")
-
-    if n == 0:
-        return float('nan'), float('nan')
-    return total_psnr / n, total_ssim / n
+def baseline_yuv(clip):
+    """Compare LR.mkv vs HR.mkv directly via ffmpeg (no model)."""
+    w, h, fps = _probe(clip['hr_path'])
+    lr_ms = ffmpeg_metrics(clip['hr_path'], str(clip['lr_path']),
+                           pix_fmt=None, width=w, height=h, framerate=fps)
+    return lr_ms

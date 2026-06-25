@@ -9,7 +9,7 @@ import optax
 from core import ICtCpNetV2
 from utils.console import console, section, sub_section, metric, divider
 from utils.loss.composite import CompositeLoss
-from utils.learn.validate import validate_rgb as validate
+from utils.learn.validate import validate, baseline_yuv
 
 
 def build_model_and_optimizer(config):
@@ -164,13 +164,22 @@ def compute_baseline(config, val_clips, model, params, logging_cfg, run_dir, out
     else:
         sub_section("Computing Baseline")
         baseline = {}
-        val_batch_size = dataset_cfg.get('validation_batch_size', 2)
         for name, clips in val_clips.items():
-            try:
-                b_psnr, b_ssim, b_vmaf = validate(model, params, clips,
-                                                  val_batch_size, name)
-            except Exception as e:
-                console.error(f"Baseline failed for {name}: {e}")
+            total = {'psnr': 0.0, 'ssim': 0.0, 'vmaf': 0.0}
+            n = 0
+            for clip in clips:
+                try:
+                    m = baseline_yuv(clip)
+                    for k in total:
+                        total[k] += m[k]
+                    n += 1
+                except Exception as e:
+                    console.error(f"Baseline failed for {clip.get('clip_name', '?')}: {e}")
+            if n > 0:
+                b_psnr = total['psnr'] / n
+                b_ssim = total['ssim'] / n
+                b_vmaf = total['vmaf'] / n
+            else:
                 b_psnr = b_ssim = b_vmaf = float('nan')
             baseline[name] = {'psnr': b_psnr, 'ssim': b_ssim, 'vmaf': b_vmaf}
             metric(name, f"psnr={b_psnr:.2f}  ssim={b_ssim:.4f}  vmaf={b_vmaf:.4f}")
