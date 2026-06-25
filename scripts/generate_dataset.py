@@ -14,12 +14,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from utils.data.probe_utils import (
+from utils.video_processor.probe_utils import (
     sanitize, discover_inputs, probe_video, get_video_resolution,
     _probe_bit_depth, color_conversion_filter, COLOR_TAGS, ENCODER_WEIGHTS,
 )
-from utils.data.encode_worker import _plan_segments, process_segment, count_segments
-from utils.data.dataset_prep import preprocess_dataset
+from utils.video_processor.encode_worker import _plan_segments, process_segment, count_segments
+from utils.video_processor import preprocess_dataset
 
 
 def main():
