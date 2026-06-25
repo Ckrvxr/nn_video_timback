@@ -28,3 +28,7 @@ __pycache__/
 *.pyo
 *.egg-info/
 *.egg
+*.swp
+*.swo
+*.kate-swp
+.DS_Store

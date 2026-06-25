@@ -85,7 +85,7 @@ def train_epoch(model, params, opt_state, train_step, loader, criterion, config,
         for name in _postfix_order:
             val = avg_loss(name)
             if val != 0.0:
-                postfix[_display_map.get(name, name)] = f'{val:.4f}'
+                postfix[_display_map.get(name, name)] = f'{val:.8f}'
         postfix['lr'] = f'{float(lr_val):.2e}'
         pbar.set_postfix(**postfix)
         pbar.update(1)

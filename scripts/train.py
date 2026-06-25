@@ -10,7 +10,8 @@ from yaml import safe_load
 from utils.console import console, section, metric, divider
 from utils.learn import cli
 from utils.learn.cli import EXIT_FLAG, sigint_handler, parse_args
-from utils.learn.io import start_io_worker, stop_io_worker, save_checkpoint
+from utils.learn.io import start_io_worker, stop_io_worker, save_epoch_checkpoint
+from utils.learn.metrics import composite_score
 from utils.learn.signals import check_run_signals
 from utils.learn.schedule import get_epoch_weights, log_validation
 from utils.learn.epoch import train_epoch
@@ -72,6 +73,8 @@ def main():
     val_batch_size = dataset_cfg.get('validation_batch_size', 2)
     baseline = compute_baseline(config, val_clips, model, params, logging_cfg, run_dir, output_dir) if val_clips else {}
 
+    loss_weights = dict(config.get('loss_weights', {}))
+
     try:
         exit_flag_ref = [EXIT_FLAG]
         for epoch in range(start_epoch, n_epochs):
@@ -80,11 +83,16 @@ def main():
                 merged = dict(config['loss_weights'])
                 merged.update(wu_weights)
                 criterion.update_weights(merged)
-                console.info(f"Epoch {epoch+1} weights: {', '.join(f'{k}={v}' for k, v in wu_weights.items() if k != 'moe')}")
+                loss_weights = merged
+                console.info(f"Epoch {epoch+1} weights: {', '.join(f'{k}={v:.8f}' for k, v in wu_weights.items() if k != 'moe')}")
 
             if check_run_signals(run_dir, exit_flag_ref):
                 EXIT_FLAG = True
-                save_checkpoint(params, opt_state, max(0, epoch - 1), run_dir, output_dir)
+                save_epoch_checkpoint(
+                    max(0, epoch - 1), params, opt_state, train_loss=0.0,
+                    metrics={}, score=0.0, lr=0.0,
+                    loss_weights=loss_weights, run_dir=run_dir, output_dir=output_dir,
+                )
                 break
 
             train_loader = make_train_loader()
@@ -98,21 +106,34 @@ def main():
                 train_loader.close()
 
             if EXIT_FLAG:
-                save_checkpoint(params, opt_state, epoch, run_dir, output_dir)
+                save_epoch_checkpoint(
+                    epoch, params, opt_state, train_loss,
+                    metrics={}, score=-train_loss * 10, lr=0.0,
+                    loss_weights=loss_weights, run_dir=run_dir, output_dir=output_dir,
+                )
                 break
 
+            metrics = {}
+            avg_lr = 0.0
             if epoch % logging_cfg.get('validation_interval', 1) == 0:
-                section(f"Epoch {epoch+1}/{n_epochs}  —  loss={train_loss:.4f}")
+                section(f"Epoch {epoch+1}/{n_epochs}  —  loss={train_loss:.8f}")
                 for name, clips in val_clips.items():
                     try:
                         psnr, ssim, vmaf = validate(model, params, clips,
                                                     val_batch_size, run_dir, name)
+                        metrics[name] = {'psnr': psnr, 'ssim': ssim, 'vmaf': vmaf}
                         log_validation(name, psnr, ssim, vmaf, baseline)
                     except Exception as e:
                         console.error(f"Validation failed for {name}: {e}")
+                # Approximate final lr of the epoch
+                avg_lr = float(lr_schedule_fn(epoch + n_batches / max(n_batches, 1)))
                 divider()
 
-            save_checkpoint(params, opt_state, epoch, run_dir, output_dir)
+            score = composite_score(metrics, baseline, train_loss)
+            save_epoch_checkpoint(
+                epoch, params, opt_state, train_loss, metrics, score, avg_lr,
+                loss_weights, run_dir, output_dir,
+            )
     finally:
         stop_io_worker()
 

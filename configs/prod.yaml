@@ -1,10 +1,16 @@
-output_directory: runs/prod
+output_directory: runs/production
 random_seed: 42
 
 dataset:
   dataset_paths:
     - ./datasets/synthetic
+    - ./datasets/cantoon/monsters_university
+    - ./datasets/game/death_stranding/
+    - ./datasets/kpop/le_sserafim_antifragile
     - ./datasets/kpop/newjeans_attention
+    - ./datasets/movie/john_wick_05x/
+    - ./datasets/sport/alysa_liu_stateside_1x/
+    - ./datasets/sport/alysa_liu_stateside_025x/
   val_dataset_paths:
     - ./datasets/val/alysa_liu_stateside_025x
     - ./datasets/val/death_stranding

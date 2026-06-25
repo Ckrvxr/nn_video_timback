@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from core import ICtCpNet, ICtCpNetV2
+from core import ICtCpNetV2
 from utils.console import console, section, sub_section, metric, divider
 from utils.loss.composite import CompositeLoss
 from utils.learn.validate import validate
@@ -22,14 +22,11 @@ def build_model_and_optimizer(config):
     sub_section("Model")
     metric("Name", model_name)
 
-    # Create model
+    # Create model — always ICtCpNetV2 (ArtRT_R1 / ArtRT_Test)
     scale = model_cfg.get('scale', 4)
-    if model_name == 'ictcp':
-        model = ICtCpNet(scale=scale)
-    else:
-        detail_path = model_cfg.get('detail_path', False)
-        multi_frame = model_cfg.get('multi_frame', False)
-        model = ICtCpNetV2(scale=scale, detail_path=detail_path, multi_frame=multi_frame)
+    detail_path = model_cfg.get('detail_path', False)
+    multi_frame = model_cfg.get('multi_frame', False)
+    model = ICtCpNetV2(scale=scale, detail_path=detail_path, multi_frame=multi_frame)
 
     # Init params with dummy input
     key = jax.random.PRNGKey(42)
@@ -57,7 +54,7 @@ def build_model_and_optimizer(config):
 
     sub_section("Training")
     if 'schedule' not in config:
-        metric("Loss Weights", str(config['loss_weights']))
+        metric("Loss Weights", str({k: f'{v:.8f}' for k, v in config['loss_weights'].items()}))
     metric("Batch Size", str(training_cfg['batch_size']))
     metric("Grad Accum", str(training_cfg.get('gradient_accumulation_steps', 1)))
     if lr_cfg:
@@ -98,16 +95,14 @@ def build_lr_schedule(config):
 def load_checkpoint(args, params, opt_state):
     start_epoch = 0
     if args.resume:
-        import pickle
-        with open(args.resume, 'rb') as f:
-            ckpt = pickle.load(f)
+        from utils.learn.io import load_checkpoint as _load
+        ckpt = _load(args.resume)
         params = ckpt['params']
         opt_state = ckpt['opt_state']
         start_epoch = ckpt['epoch'] + 1
     elif args.pretrained:
-        import pickle
-        with open(args.pretrained, 'rb') as f:
-            ckpt = pickle.load(f)
+        from utils.learn.io import load_checkpoint as _load
+        ckpt = _load(args.pretrained)
         params = ckpt['params'] if 'params' in ckpt else ckpt
     return params, opt_state, start_epoch
 

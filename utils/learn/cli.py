@@ -2,12 +2,10 @@ import argparse
 import os
 import random
 import signal
+import sys
 
 import numpy as np
-import jax
-import jax.numpy as jnp
 
-from utils.console import console
 
 
 EXIT_FLAG = False
@@ -20,6 +18,14 @@ def sigint_handler(signum, frame):
     if os.getpid() != MAIN_PID:
         return
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # tqdm leaves the terminal in raw mode, preventing input() from working.
+    # Restore the terminal to cooked mode before prompting.
+    try:
+        import termios
+        fd = sys.stdin.fileno()
+        termios.tcsetattr(fd, termios.TCSAFLUSH, termios.tcgetattr(fd))
+    except Exception:
+        pass
     print()
     print("\033[1;33m═══ Training Paused (Ctrl+C detected) ═══\033[0m")
     print("  \033[1;37m[c]\033[0m Continue training")
