@@ -9,7 +9,7 @@ import optax
 from core import ICtCpNetV2
 from utils.console import console, section, sub_section, metric, divider
 from utils.loss.composite import CompositeLoss
-from utils.learn.validate import validate
+from utils.learn.validate import validate_rgb as validate
 
 
 def build_model_and_optimizer(config):
@@ -168,8 +168,7 @@ def compute_baseline(config, val_clips, model, params, logging_cfg, run_dir, out
         for name, clips in val_clips.items():
             try:
                 b_psnr, b_ssim, b_vmaf = validate(model, params, clips,
-                                                  val_batch_size, run_dir, name,
-                                                  baseline=True)
+                                                  val_batch_size, name)
             except Exception as e:
                 console.error(f"Baseline failed for {name}: {e}")
                 b_psnr = b_ssim = b_vmaf = float('nan')

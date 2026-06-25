@@ -1,14 +1,14 @@
 import jax.numpy as jnp
 
 
-def calculate_psnr_batch(pred, target, max_val=1.0):
-    """PSNR per sample in batch. Input: NHWC [B, H, W, C]."""
+def calculate_psnr_batch(pred, target, max_val=2.0):
+    """PSNR per sample in batch. Input: NHWC [B, H, W, C], range [-1, 1]."""
     mse = jnp.mean((pred - target) ** 2, axis=(1, 2, 3))
     return 20 * jnp.log10(max_val) - 10 * jnp.log10(mse + 1e-8)
 
 
-def calculate_ssim_batch(pred, target, max_val=1.0, K1=0.01, K2=0.03):
-    """Simplified SSIM. Input: NHWC [B, H, W, C]."""
+def calculate_ssim_batch(pred, target, max_val=2.0, K1=0.01, K2=0.03):
+    """Simplified SSIM. Input: NHWC [B, H, W, C], range [-1, 1]."""
     C1 = (K1 * max_val) ** 2
     C2 = (K2 * max_val) ** 2
 

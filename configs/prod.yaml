@@ -24,7 +24,7 @@ model_architecture:
   # multi_frame: false
 
 training_settings:
-  batch_size: 8
+  batch_size: 10
   num_epochs: 100
   lr:
     warmup_peak: 2.0e-4
