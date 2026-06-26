@@ -54,7 +54,8 @@ def build_model_and_optimizer(config):
     metric("Batch Size", str(training_cfg['batch_size']))
     metric("Grad Accum", str(training_cfg.get('gradient_accumulation_steps', 1)))
     if lr_cfg:
-        lr_str = f"cosine  warmup={lr_cfg['warmup_epochs']}ep  peak={lr_cfg['true_peak']:.2e}  min={lr_cfg['min']:.2e}"
+        period = lr_cfg.get('period', training_cfg['num_epochs'])
+        lr_str = f"cosine  peak={lr_cfg['peak']:.2e}  min={lr_cfg['min']:.2e}  period={period}ep"
         metric("LR Schedule", lr_str)
     else:
         metric("Learning Rate", f"{opt_lr:.2e}")
@@ -69,19 +70,14 @@ def build_lr_schedule(config):
     n_epochs = training_cfg['num_epochs']
 
     if lr_cfg:
-        warmup = lr_cfg['warmup_epochs']
-        peak = lr_cfg['warmup_peak']
-        true_peak = lr_cfg['true_peak']
+        peak = lr_cfg['peak']
         min_lr = lr_cfg['min']
+        period = lr_cfg.get('period', n_epochs)
 
         def schedule_fn(epoch):
-            if epoch < warmup:
-                return peak * (epoch + 1) / warmup
-            frac = (epoch - warmup) / max(n_epochs - warmup, 1)
+            frac = (epoch % period) / max(period - 1, 1)
             cosine = 0.5 * (1 + torch.cos(torch.tensor(torch.pi * frac)))
-            progress = min(epoch / n_epochs, 1.0)
-            current_peak = peak + (true_peak - peak) * progress
-            return min_lr + (current_peak - min_lr) * cosine
+            return min_lr + (peak - min_lr) * cosine
 
         return schedule_fn, n_epochs
     else:

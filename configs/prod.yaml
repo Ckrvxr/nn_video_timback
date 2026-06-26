@@ -27,11 +27,9 @@ training_settings:
   batch_size: 10
   num_epochs: 100
   lr:
-    warmup_peak: 2.0e-4
-    warmup_epochs: 1
-    true_peak: 5.0e-5
+    peak: 5.0e-5
     min: 1.0e-6
-  learning_rate: 5.0e-5
+    period: 30
   weight_decay: 1.0e-4
   adam_beta1: 0.9
   adam_beta2: 0.95
