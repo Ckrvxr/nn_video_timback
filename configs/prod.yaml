@@ -18,7 +18,7 @@ dataset:
   validation_batch_size: 2
 
 model_architecture:
-  model_name: ArtRT_R2
+  model_name: ArtRT
   d_model: 48
   d_state: 32
 

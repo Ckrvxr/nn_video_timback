@@ -5,7 +5,7 @@ from core.torch.modules import pixel_unshuffle, pixel_shuffle, haar_dwt, haar_iw
 from core.torch.ssm_block import VMambaBlock
 
 
-class ICtCpNetR2(nn.Module):
+class ArtRT(nn.Module):
     def __init__(self, d_model: int = 48, d_state: int = 32):
         super().__init__()
         self.body = VMambaBlock(d_model, d_state=d_state)

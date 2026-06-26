@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, IterableDataset
 
-from core.torch import ICtCpNetR2
+from core.torch import ArtRT
 from utils.console import console, section, sub_section, metric, detail, divider
 from utils.loss.torch_composite import CompositeLoss
 
@@ -20,14 +20,14 @@ def build_model_and_optimizer(config):
 
     section("Training Setup")
 
-    model_name = model_cfg.get('model_name', 'ArtRT_R2')
+    model_name = model_cfg.get('model_name', 'ArtRT')
     sub_section("Model")
     metric("Name", model_name)
 
     d_model = model_cfg.get('d_model', 48)
     d_state = model_cfg.get('d_state', 32)
 
-    model = ICtCpNetR2(d_model=d_model, d_state=d_state)
+    model = ArtRT(d_model=d_model, d_state=d_state)
     n_params = sum(p.numel() for p in model.parameters())
     metric("Parameters", f"{n_params:,}")
 

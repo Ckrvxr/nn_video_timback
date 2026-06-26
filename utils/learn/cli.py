@@ -55,5 +55,3 @@ def parse_args():
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
-    with open('/tmp/jax_seed.txt', 'w') as f:
-        f.write(str(seed))

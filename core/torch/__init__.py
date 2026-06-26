@@ -1,1 +1,1 @@
-from core.torch.artrt_r2 import ICtCpNetR2
+from core.torch.artrt_r2 import ArtRT
