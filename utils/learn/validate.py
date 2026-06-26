@@ -14,8 +14,7 @@ import jax
 import numpy as np
 from PIL import Image
 
-from utils.colorspace import ictcp_to_yuv, yuv_to_rgb
-from utils.colorspace.color_space import eotf_pq_np
+from utils.colorspace import ictcp_to_rgb_np
 from utils.console import console
 from utils.data.mkv_loader import _decode_clip
 from utils.evaluation.metrics import calculate_psnr_batch, calculate_ssim_batch
@@ -30,22 +29,17 @@ def _release_jax_memory():
 
 
 def _vmaf_8bit_png(pred_ictcp: np.ndarray, target_ictcp: np.ndarray) -> float:
-    """VMAF via ICtCp → YUV → RGB → PQ→sRGB tone map → uint8 PNG → ffmpeg libvmaf.
+    """VMAF via ICtCp → linear RGB [0,1] → sRGB gamma → uint8 PNG → ffmpeg libvmaf.
 
-    libvmaf expects standard 8-bit SDR.  The linear matrix from ``yuv_to_rgb``
-    gives PQ-encoded RGB; we apply PQ EOTF followed by sRGB gamma to produce
-    proper SDR input.
+    Both PSNR/SSIM (``_clip_rgb_metrics``) and VMAF now share the same
+    ``ictcp_to_rgb_np`` path, ensuring consistency.
     """
-    pred_yuv = np.array(ictcp_to_yuv(pred_ictcp))
-    target_yuv = np.array(ictcp_to_yuv(target_ictcp))
-    pred_rgb = np.array(yuv_to_rgb(pred_yuv))
-    target_rgb = np.array(yuv_to_rgb(target_yuv))
+    pred_rgb = ictcp_to_rgb_np(pred_ictcp)       # linear [0, 1]
+    target_rgb = ictcp_to_rgb_np(target_ictcp)    # linear [0, 1]
 
-    # [-1, 1] → [0, 1] → PQ EOTF → linear light → sRGB gamma → uint8
-    pred_rgb = eotf_pq_np((pred_rgb + 1) / 2)
-    target_rgb = eotf_pq_np((target_rgb + 1) / 2)
-    pred_u8 = (np.power(np.clip(pred_rgb / 10000, 0, 1), 1 / 2.2) * 255).clip(0, 255).astype(np.uint8)
-    target_u8 = (np.power(np.clip(target_rgb / 10000, 0, 1), 1 / 2.2) * 255).clip(0, 255).astype(np.uint8)
+    # sRGB gamma for the 8-bit PNG (libvmaf expects standard SDR)
+    pred_u8 = (np.power(pred_rgb, 1 / 2.2) * 255).clip(0, 255).astype(np.uint8)
+    target_u8 = (np.power(target_rgb, 1 / 2.2) * 255).clip(0, 255).astype(np.uint8)
 
     if pred_u8.ndim == 4:
         pred_u8, target_u8 = pred_u8[0], target_u8[0]
@@ -82,16 +76,15 @@ def _vmaf_8bit_png(pred_ictcp: np.ndarray, target_ictcp: np.ndarray) -> float:
 def _clip_rgb_metrics(pred_ictcp: np.ndarray, target_ictcp: np.ndarray) -> dict:
     """Return ``{'psnr', 'ssim', 'vmaf'}`` from ICtCp tensors.
 
-    PSNR/SSIM in float32 RGB (linear matrix, no PQ), no YUV ceiling.
+    PSNR/SSIM in linear RGB [0, 1] via ``ictcp_to_rgb_np`` (float64 arithmetic,
+    clip to [0, 1]), matching the training loss space.  No YUV ceiling.
     VMAF from 8-bit PNG screenshots.
     """
-    pred_yuv = np.array(ictcp_to_yuv(pred_ictcp))
-    target_yuv = np.array(ictcp_to_yuv(target_ictcp))
-    pred_rgb = np.array(yuv_to_rgb(pred_yuv))
-    target_rgb = np.array(yuv_to_rgb(target_yuv))
+    pred_rgb = ictcp_to_rgb_np(pred_ictcp)
+    target_rgb = ictcp_to_rgb_np(target_ictcp)
 
-    psnr = float(calculate_psnr_batch(pred_rgb, target_rgb).mean())
-    ssim = float(calculate_ssim_batch(pred_rgb, target_rgb).mean())
+    psnr = float(calculate_psnr_batch(pred_rgb, target_rgb, max_val=1.0).mean())
+    ssim = float(calculate_ssim_batch(pred_rgb, target_rgb, max_val=1.0).mean())
     vmaf = _vmaf_8bit_png(pred_ictcp, target_ictcp)
 
     return {'psnr': psnr, 'ssim': ssim, 'vmaf': vmaf}
