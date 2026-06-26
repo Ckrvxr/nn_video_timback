@@ -9,8 +9,11 @@ import optax
 from core import ICtCpNetV2
 from utils.console import console, section, sub_section, metric, divider
 from utils.loss.composite import CompositeLoss
-from utils.learn.validate import validate, baseline_clip
+from utils.learn.validate import baseline_clip
 
+
+def _fmt(v):
+    return f'{v:.8f}'.rstrip('0').rstrip('.')
 
 def build_model_and_optimizer(config):
     model_cfg = config['model_architecture']
@@ -59,7 +62,7 @@ def build_model_and_optimizer(config):
     criterion = CompositeLoss(initial_weights)
 
     sub_section("Training")
-    metric("Loss Weights", str({k: f'{v:.8f}' for k, v in initial_weights.items()}))
+    metric("Loss Weights", str({k: _fmt(v) for k, v in initial_weights.items()}))
     metric("Batch Size", str(training_cfg['batch_size']))
     metric("Grad Accum", str(training_cfg.get('gradient_accumulation_steps', 1)))
     if lr_cfg:

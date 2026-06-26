@@ -26,6 +26,10 @@ from utils.learn.step import make_train_step
 signal.signal(signal.SIGINT, sigint_handler)
 
 
+def _fmt(v):
+    return f'{v:.8f}'.rstrip('0').rstrip('.')
+
+
 def main():
     global EXIT_FLAG
     start_io_worker()
@@ -89,7 +93,7 @@ def main():
                 merged.update(wu_weights)
                 criterion.update_weights(merged)
                 loss_weights = merged
-                console.info(f"Epoch {epoch+1} weights: {', '.join(f'{k}={v:.8f}' for k, v in wu_weights.items() if k != 'moe')}")
+                console.info(f"Epoch {epoch+1} weights: {', '.join(f'{k}={_fmt(v)}' for k, v in wu_weights.items() if k != 'moe')}")
 
             if check_run_signals(run_dir, exit_flag_ref):
                 EXIT_FLAG = True
