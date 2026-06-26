@@ -45,8 +45,8 @@ def train_epoch(model, params, opt_state, train_step, loader, criterion, config,
     total_loss = 0.0
     running_losses: dict[str, deque] = {}
 
-    _postfix_order = ['total', 'char', 'rgb', 'haarpsi']
-    _display_map = {'total': 'loss'}
+    _display_order = ['total', 'char', 'rgb', 'haarpsi']
+    _display_names = {'total': 'loss'}
 
     pbar = tqdm(total=n_batches, desc=f"Epoch {epoch+1}/{n_epochs}",
                 unit='batch', leave=False, dynamic_ncols=True)
@@ -81,13 +81,15 @@ def train_epoch(model, params, opt_state, train_step, loader, criterion, config,
         def avg_loss(name):
             d = running_losses.get(name)
             return sum(d) / len(d) if d else 0.0
-        postfix = {}
-        for name in _postfix_order:
+
+        parts = []
+        for name in _display_order:
             val = avg_loss(name)
             if val != 0.0:
-                postfix[_display_map.get(name, name)] = f'{val:.8f}'
-        postfix['lr'] = f'{float(lr_val):.2e}'
-        pbar.set_postfix(**postfix)
+                label = _display_names.get(name, name)
+                parts.append(f"{label}={val:.8f}")
+        parts.append(f"lr={float(lr_val):.2e}")
+        pbar.set_description_str(f"Epoch {epoch+1}/{n_epochs} | {'  '.join(parts)}")
         pbar.update(1)
 
     pbar.close()
