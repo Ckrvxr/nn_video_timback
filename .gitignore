@@ -1,34 +1,25 @@
-# uv
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
 .venv/
 .python-version
 
-# Runs
+# Training outputs
 runs/
-*.log
 
 # Data
 datasets/
 
-# Editors
+# IDE
 .vscode/
 .idea/
 
 # OS
 .DS_Store
+Thumbs.db
 
-# Temp / Cache
-.mypy_cache/
-.ruff_cache/
-.pytest_cache/
-tmp/
-temp/
-.playwright-mcp/
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-*.egg
-*.swp
-*.swo
-*.kate-swp
-.DS_Store
+# Torch
+*.pt
+*.pth

@@ -1,11 +1,6 @@
 import numpy as np
 import torch
 
-try:
-    import jax.numpy as jnp
-except ImportError:
-    jnp = None
-
 
 # ── PQ Constants (float64 for internal EOTF/OETF accuracy)
 M1 = 2610.0 / 16384.0
@@ -63,14 +58,7 @@ MAT_LMS2ICTCP = np.array([
 MAT_ICTCP2LMS = np.linalg.inv(MAT_LMS2ICTCP)
 
 
-# ── JAX Matrices (float32 copies for JIT efficiency, only if JAX available)
-if jnp is not None:
-    _M_YUV2RGB = jnp.array(MAT_BT2020_YUV2RGB.astype(np.float32))
-    _M_RGB2YUV = jnp.array(MAT_RGB2YUV.astype(np.float32))
-    _M_RGB2LMS = jnp.array(MAT_RGB2LMS.astype(np.float32))
-    _M_LMS2RGB = jnp.array(MAT_LMS2RGB.astype(np.float32))
-    _M_LMS2ICTCP = jnp.array(MAT_LMS2ICTCP.astype(np.float32))
-    _M_ICTCP2LMS = jnp.array(MAT_ICTCP2LMS.astype(np.float32))
+
 
 
 # ── PQ Transfer Functions
