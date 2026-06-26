@@ -3,6 +3,7 @@ import torch.nn as nn
 
 from utils.loss.torch_charbonnier import charbonnier_loss
 from utils.loss.torch_haarpsi import haarpsi_loss
+from utils.loss.torch_gmsd import gmsd_loss
 
 
 class CompositeLoss(nn.Module):
@@ -10,6 +11,7 @@ class CompositeLoss(nn.Module):
         super().__init__()
         self.w_char = config.get('charbonnier', 1.0)
         self.w_haarpsi = config.get('haarpsi', 0.0)
+        self.w_gmsd = config.get('gmsd', 0.0)
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> dict:
         losses = {}
@@ -18,6 +20,10 @@ class CompositeLoss(nn.Module):
             losses['haarpsi'] = haarpsi_loss(pred, target) * self.w_haarpsi
         else:
             losses['haarpsi'] = torch.tensor(0.0, device=pred.device)
+        if self.w_gmsd > 0:
+            losses['gmsd'] = gmsd_loss(pred, target) * self.w_gmsd
+        else:
+            losses['gmsd'] = torch.tensor(0.0, device=pred.device)
         losses['total'] = sum(losses.values())
         return losses
 
@@ -25,6 +31,7 @@ class CompositeLoss(nn.Module):
         weight_map = {
             'charbonnier': 'w_char',
             'haarpsi': 'w_haarpsi',
+            'gmsd': 'w_gmsd',
         }
         for k, v in weights.items():
             attr = weight_map.get(k)

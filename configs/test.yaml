@@ -15,6 +15,7 @@ model_architecture:
   model_name: ArtRT
   d_model: 48
   d_state: 32
+  compile: default
 
 training_settings:
   batch_size: 4
@@ -36,6 +37,7 @@ schedule:
     weights:
       charbonnier: 1.0
       haarpsi: 0.5
+      gmsd: 0.1
 
 logging_settings:
   log_interval: 50

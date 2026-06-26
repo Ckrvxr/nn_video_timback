@@ -45,7 +45,7 @@ def train_epoch(model, loader, criterion, optimizer, config,
     total_loss = 0.0
     running_losses: dict[str, deque] = {}
 
-    _display_order = ['total', 'char', 'haarpsi']
+    _display_order = ['total', 'char', 'gmsd', 'haarpsi']
     _display_names = {'total': 'loss'}
 
     pbar = tqdm(total=n_batches, desc=f"Epoch {epoch+1}/{n_epochs}",

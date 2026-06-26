@@ -48,6 +48,13 @@ def main():
 
     model, optimizer, criterion = build_model_and_optimizer(config)
     model.to(device, dtype=dtype)
+
+    compile_mode = config.get('model_architecture', {}).get('compile', None)
+    if compile_mode:
+        torch.set_float32_matmul_precision('high')
+        model = torch.compile(model, mode=compile_mode)
+        metric("Compile", compile_mode)
+
     lr_schedule_fn, n_epochs = build_lr_schedule(config)
     start_epoch = 0
 

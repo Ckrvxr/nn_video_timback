@@ -45,7 +45,7 @@ def build_model_and_optimizer(config):
     if schedule:
         initial_weights = dict(schedule[0]['weights'])
     else:
-        initial_weights = {'charbonnier': 1.0, 'haarpsi': 0.0}
+        initial_weights = {'charbonnier': 1.0, 'haarpsi': 0.0, 'gmsd': 0.0}
     criterion = CompositeLoss(initial_weights)
 
     sub_section("Training")
