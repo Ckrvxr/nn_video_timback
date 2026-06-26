@@ -16,18 +16,19 @@ dataset:
     - ./datasets/val/alysa_liu_stateside_025x
     - ./datasets/val/death_stranding
     - ./datasets/val/newjeans_attention
-  validation_batch_size: 2
+  validation_batch_size: 5
 
 model_architecture:
   model_name: ArtRT
-  d_model: 64
-  d_state: 64
-  expand: 4
-  chunk_size: 64
+  dim: 48
+  n1: 2
+  n2: 6
+  n3: 8
+  nmid: 12
   compile: default
 
 training_settings:
-  batch_size: 10
+  batch_size: 8
   num_epochs: 100
   lr:
     peak: 5.0e-5
@@ -35,22 +36,18 @@ training_settings:
     period: 30
   weight_decay: 1.0e-4
   adam_beta1: 0.9
-  adam_beta2: 0.95
-  gradient_clipping_threshold: 5.0
+  adam_beta2: 0.999
+  gradient_clipping_threshold: 1.0
   gradient_accumulation_steps: 2
 
 schedule:
   - epoch: 1+
     weights:
-      charbonnier: 5.0
-      haarpsi: 5.0
-      gmsd: 0.5
+      charbonnier: 0.999
+      fft: 0.001
+      # haarpsi: 5.0
+
 
 logging_settings:
   log_interval: 100
   validation_interval: 1
-
-memory_settings:
-  max_ram_ratio: 0.5
-  max_vram_ratio: 0.8
-  check_interval: 256

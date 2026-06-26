@@ -39,13 +39,14 @@ def check_pause_exit_signals(run_dir: Path | None) -> bool:
 
 
 def train_epoch(model, loader, criterion, optimizer, config,
-                lr_schedule_fn, device, dtype=torch.float32, run_dir=None, epoch=0, n_epochs=0, n_batches=0):
+                lr_schedule_fn, device, dtype=torch.float32, run_dir=None,
+                epoch=0, n_epochs=0, n_batches=0, scaler=None):
     loss_window = config.get('logging_settings', {}).get('loss_window', 100)
 
     total_loss = 0.0
     running_losses: dict[str, deque] = {}
 
-    _display_order = ['total', 'char', 'gmsd', 'haarpsi']
+    _display_order = ['total', 'char', 'fft', 'haarpsi']
     _display_names = {'total': 'loss'}
 
     pbar = tqdm(total=n_batches, desc=f"Epoch {epoch+1}/{n_epochs}",
@@ -65,17 +66,30 @@ def train_epoch(model, loader, criterion, optimizer, config,
         for g in optimizer.param_groups:
             g['lr'] = lr_val
 
-        pred = model(x)
-        loss_dict = criterion(pred, target)
+        if scaler is not None:
+            with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+                pred = model(x)
+                loss_dict = criterion(pred, target)
+        else:
+            pred = model(x)
+            loss_dict = criterion(pred, target)
+
         loss_val = loss_dict['total']
 
         if torch.isnan(loss_val) or torch.isinf(loss_val):
             console.warning(f"Skipped batch {batch_idx} due to non-finite loss")
             continue
 
-        loss_val.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.get('training_settings', {}).get('gradient_clipping_threshold', 1.0))
-        optimizer.step()
+        if scaler is not None:
+            scaler.scale(loss_val).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.get('training_settings', {}).get('gradient_clipping_threshold', 1.0))
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss_val.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.get('training_settings', {}).get('gradient_clipping_threshold', 1.0))
+            optimizer.step()
         optimizer.zero_grad()
 
         batch_loss = loss_val.detach().item()

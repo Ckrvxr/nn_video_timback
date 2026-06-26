@@ -44,10 +44,12 @@ def main():
     logging_cfg = config['logging_settings']
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
+    dtype = torch.float16 if device.type == 'cuda' else torch.float32
 
     model, optimizer, criterion = build_model_and_optimizer(config)
-    model.to(device, dtype=dtype)
+    model.to(device)
+
+    scaler = torch.amp.GradScaler() if dtype == torch.float16 else None
 
     compile_mode = config.get('model_architecture', {}).get('compile', None)
     if compile_mode:
@@ -119,6 +121,7 @@ def main():
                 model, train_loader, criterion, optimizer, config,
                 lr_schedule_fn, device, dtype, run_dir=run_dir,
                 epoch=epoch, n_epochs=n_epochs, n_batches=n_batches,
+                scaler=scaler,
             )
 
             if EXIT_FLAG:

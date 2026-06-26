@@ -14,9 +14,13 @@ from utils.evaluation.torch_metrics import calculate_psnr_batch, calculate_ssim_
 from utils.loss.vgg_perceptual import VGGDistance
 
 
+def _lin_to_8bit(rgb: np.ndarray) -> np.ndarray:
+    """Linear RGB [0,1] → 8-bit sRGB via BT.709 gamma."""
+    return (np.power(rgb.clip(0, 1), 1 / 2.2) * 255).clip(0, 255).astype(np.uint8)
+
 def _vmaf_8bit_png(pred_rgb: np.ndarray, target_rgb: np.ndarray) -> float:
-    pred_u8 = (np.power(pred_rgb.clip(0, 1), 1 / 2.2) * 255).clip(0, 255).astype(np.uint8)
-    target_u8 = (np.power(target_rgb.clip(0, 1), 1 / 2.2) * 255).clip(0, 255).astype(np.uint8)
+    pred_u8 = _lin_to_8bit(pred_rgb)
+    target_u8 = _lin_to_8bit(target_rgb)
     if pred_u8.ndim == 4:
         pred_u8, target_u8 = pred_u8[0], target_u8[0]
     if pred_u8.shape[0] in (1, 3):

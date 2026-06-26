@@ -1,13 +1,9 @@
 import argparse
-import json
-import re
 import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -15,10 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from utils.video_processor.probe_utils import (
-    sanitize, discover_inputs, probe_video, get_video_resolution,
-    _probe_bit_depth, color_conversion_filter, COLOR_TAGS, ENCODER_WEIGHTS,
+    sanitize, discover_inputs,
 )
-from utils.video_processor.encode_worker import _plan_segments, process_segment, count_segments
+from utils.video_processor.encode_worker import _plan_segments, process_segment
 from utils.video_processor import preprocess_dataset
 
 

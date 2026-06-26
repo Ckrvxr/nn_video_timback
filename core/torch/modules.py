@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 def pixel_unshuffle(x: torch.Tensor, r: int) -> torch.Tensor:

@@ -52,7 +52,8 @@ def _eotf_pq_torch(v: torch.Tensor) -> torch.Tensor:
 
 
 def yuv_to_rgb_linear_np(yuv: np.ndarray, bits: int = 8) -> np.ndarray:
-    """YUV uint16 → linear RGB [0,1] float32 NHWC.  CPU-only."""
+    """YUV uint16 → linear RGB [0,1] float32 NHWC.  CPU-only.
+       Uses BT.1886 (gamma 2.2) EOTF for BT.709 transfer content."""
     peak = np.float32((1 << bits) - 1)
     center = np.float32(1 << (bits - 1))
     f = yuv.astype(np.float32)
@@ -61,12 +62,13 @@ def yuv_to_rgb_linear_np(yuv: np.ndarray, bits: int = 8) -> np.ndarray:
     f[..., 1:] /= peak
     rgb_nl = f @ MAT_BT2020_YUV2RGB.T
     rgb_nl = np.clip(rgb_nl, 0.0, None)
-    rgb_lin = eotf_pq_np(rgb_nl)
+    rgb_lin = rgb_nl ** 2.2
     return np.clip(rgb_lin, 0.0, 1.0)
 
 
 def yuv_to_rgb_linear_cuda(yuv: torch.Tensor, bits: int = 12) -> torch.Tensor:
-    """YUV uint16 → linear RGB [0,1] bf16 NCHW.  GPU-only.  Input: [B,H,W,3] uint16."""
+    """YUV uint16 → linear RGB [0,1] fp16 NCHW.  GPU-only.  Input: [B,H,W,3] uint16.
+       Uses BT.1886 (gamma 2.2) EOTF for BT.709 transfer content."""
     peak = float((1 << bits) - 1)
     center = float(1 << (bits - 1))
     f = yuv.float()
@@ -78,5 +80,5 @@ def yuv_to_rgb_linear_cuda(yuv: torch.Tensor, bits: int = 12) -> torch.Tensor:
     mat = torch.tensor(MAT_BT2020_YUV2RGB.T.astype(np.float32), device=yuv.device)
     rgb_nl = yuv_n @ mat
     rgb_nl = rgb_nl.clamp(min=0.0)
-    rgb_lin = _eotf_pq_torch(rgb_nl.permute(0, 3, 1, 2)).clamp(0.0, 1.0)
-    return rgb_lin.bfloat16()
+    rgb_lin = (rgb_nl.permute(0, 3, 1, 2) ** 2.2).clamp(0.0, 1.0)
+    return rgb_lin.half()

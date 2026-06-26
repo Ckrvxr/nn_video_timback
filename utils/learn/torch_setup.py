@@ -24,12 +24,13 @@ def build_model_and_optimizer(config):
     sub_section("Model")
     metric("Name", model_name)
 
-    d_model = model_cfg.get('d_model', 48)
-    d_state = model_cfg.get('d_state', 48)
-    expand = model_cfg.get('expand', 4)
-    chunk_size = model_cfg.get('chunk_size', 512)
+    dim = model_cfg.get('dim', 48)
+    n1 = model_cfg.get('n1', 2)
+    n2 = model_cfg.get('n2', 6)
+    n3 = model_cfg.get('n3', 8)
+    nmid = model_cfg.get('nmid', 12)
 
-    model = ArtRT(d_model=d_model, d_state=d_state, expand=expand, chunk_size=chunk_size)
+    model = ArtRT(dim=dim, n1=n1, n2=n2, n3=n3, nmid=nmid)
     n_params = sum(p.numel() for p in model.parameters())
     metric("Parameters", f"{n_params:,}")
 
@@ -47,7 +48,7 @@ def build_model_and_optimizer(config):
     if schedule:
         initial_weights = dict(schedule[0]['weights'])
     else:
-        initial_weights = {'charbonnier': 1.0, 'haarpsi': 0.0, 'gmsd': 0.0}
+        initial_weights = {'charbonnier': 1.0, 'haarpsi': 0.0, 'fft': 0.0}
     criterion = CompositeLoss(initial_weights)
 
     sub_section("Training")
@@ -96,7 +97,8 @@ class MKVIterableDataset(IterableDataset):
         self.mirror = mirror
 
     def __iter__(self):
-        import queue, threading
+        import queue
+        import threading
         q = queue.Queue(maxsize=self.prefetch)
         sentinel = object()
 
@@ -120,7 +122,6 @@ class MKVIterableDataset(IterableDataset):
             yield item
 
     def _generator(self):
-        import numpy as np
         import torch
         from utils.data.mkv_loader import decode_yuv
         from utils.colorspace.color_space import yuv_to_rgb_linear_cuda
@@ -221,7 +222,6 @@ def load_checkpoint(args, model, optimizer):
 
 
 def compute_baseline(config, val_clips, logging_cfg, run_dir, output_dir):
-    import json
     dataset_cfg = config['dataset']
     model_cfg = config['model_architecture']
 

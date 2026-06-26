@@ -34,6 +34,7 @@ def _ffmpeg_to_yuv(path: Path) -> np.ndarray:
     cmd = [
         'ffmpeg', '-vsync', '0', '-hide_banner',
         '-i', str(path),
+        '-vf', "zscale=matrix=bt2020nc:transfer=bt709:primaries=bt709:range=full",
         '-f', 'rawvideo',
         '-pix_fmt', 'yuv444p12le',
         '-s', f'{width}x{height}',
@@ -44,8 +45,9 @@ def _ffmpeg_to_yuv(path: Path) -> np.ndarray:
         raise RuntimeError(f'ffmpeg decode failed for {path}: {proc.stderr.decode()[-500:]}')
 
     raw = np.frombuffer(proc.stdout, dtype=np.uint16)
-    n_frames = raw.size // (width * height * 3)
-    return raw.reshape(n_frames, height, width, 3)
+    n_frames = raw.size // (3 * height * width)
+    planes = raw[:n_frames * 3 * height * width].reshape(n_frames, 3, height, width)
+    return np.transpose(planes, (0, 2, 3, 1))
 
 
 # ── Public API ────────────────────────────────────────────────────────

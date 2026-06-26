@@ -1,1 +1,1 @@
-from core.torch.artrt_r2 import ArtRT
+from core.torch.artrt import ArtRT
