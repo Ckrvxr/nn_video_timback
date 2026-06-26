@@ -9,7 +9,7 @@ class ArtRT(nn.Module):
     def __init__(self, d_model: int = 48, d_state: int = 32):
         super().__init__()
         self.body = VMambaBlock(d_model, d_state=d_state)
-        self.refine = nn.Conv2d(12, 3, 5, padding=2, bias=False)
+        self.refine = nn.Conv2d(12, 3, 5, padding=2, padding_mode='reflect', bias=False)
 
     def forward(self, x):
         LL, LH, HL, HH = haar_dwt(x)

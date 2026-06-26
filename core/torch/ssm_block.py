@@ -51,10 +51,10 @@ class VMambaBlock(nn.Module):
         C = d_model
         self.norm = nn.LayerNorm(C, eps=1e-5)
         self.expand = nn.Conv2d(C, C * 2, 1, bias=False)
-        self.prefilter = nn.Conv2d(C, C, 3, padding=1, groups=C, bias=False)
+        self.prefilter = nn.Conv2d(C, C, 3, padding=1, padding_mode='reflect', groups=C, bias=False)
         self.ss2d = SS2D(C, d_state, d_conv)
         self.cross_merge = nn.Conv2d(C * 4, C, 1, bias=False)
-        self.blender = nn.Conv2d(C, C, 3, padding=1, groups=C, bias=False)
+        self.blender = nn.Conv2d(C, C, 3, padding=1, padding_mode='reflect', groups=C, bias=False)
         self.project = nn.Conv2d(C, C, 1, bias=False)
         self.layerscale = LayerScale(C, init=1e-4)
 
