@@ -6,9 +6,10 @@ from core.torch.ssm_block import VMambaBlock
 
 
 class ArtRT(nn.Module):
-    def __init__(self, d_model: int = 48, d_state: int = 32):
+    def __init__(self, d_model: int = 48, d_state: int = 48,
+                 expand: int = 4, chunk_size: int = 512):
         super().__init__()
-        self.body = VMambaBlock(d_model, d_state=d_state)
+        self.body = VMambaBlock(d_model, d_state=d_state, expand=expand, chunk_size=chunk_size)
         self.refine = nn.Conv2d(12, 3, 5, padding=2, padding_mode='reflect', bias=False)
 
     def forward(self, x):

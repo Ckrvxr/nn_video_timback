@@ -5,10 +5,12 @@ from mamba_ssm import Mamba2
 
 
 class SS2D(nn.Module):
-    def __init__(self, d_model: int, d_state: int = 32, d_conv: int = 4):
+    def __init__(self, d_model: int, d_state: int = 48, d_conv: int = 4,
+                 expand: int = 4, chunk_size: int = 512):
         super().__init__()
         self.scans = nn.ModuleList([
-            Mamba2(d_model=d_model, d_state=d_state, d_conv=d_conv, headdim=d_state)
+            Mamba2(d_model=d_model, d_state=d_state, d_conv=d_conv,
+                   headdim=d_state, expand=expand, chunk_size=chunk_size)
             for _ in range(4)
         ])
 
@@ -46,13 +48,14 @@ class LayerScale(nn.Module):
 
 
 class VMambaBlock(nn.Module):
-    def __init__(self, d_model: int, d_state: int = 32, d_conv: int = 4):
+    def __init__(self, d_model: int, d_state: int = 48, d_conv: int = 4,
+                 expand: int = 4, chunk_size: int = 512):
         super().__init__()
         C = d_model
         self.norm = nn.LayerNorm(C, eps=1e-5)
         self.expand = nn.Conv2d(C, C * 2, 1, bias=False)
         self.prefilter = nn.Conv2d(C, C, 3, padding=1, padding_mode='reflect', groups=C, bias=False)
-        self.ss2d = SS2D(C, d_state, d_conv)
+        self.ss2d = SS2D(C, d_state, d_conv, expand=expand, chunk_size=chunk_size)
         self.cross_merge = nn.Conv2d(C * 4, C, 1, bias=False)
         self.blender = nn.Conv2d(C, C, 3, padding=1, padding_mode='reflect', groups=C, bias=False)
         self.project = nn.Conv2d(C, C, 1, bias=False)

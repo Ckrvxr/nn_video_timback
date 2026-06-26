@@ -25,14 +25,16 @@ def build_model_and_optimizer(config):
     metric("Name", model_name)
 
     d_model = model_cfg.get('d_model', 48)
-    d_state = model_cfg.get('d_state', 32)
+    d_state = model_cfg.get('d_state', 48)
+    expand = model_cfg.get('expand', 4)
+    chunk_size = model_cfg.get('chunk_size', 512)
 
-    model = ArtRT(d_model=d_model, d_state=d_state)
+    model = ArtRT(d_model=d_model, d_state=d_state, expand=expand, chunk_size=chunk_size)
     n_params = sum(p.numel() for p in model.parameters())
     metric("Parameters", f"{n_params:,}")
 
     lr_cfg = training_cfg.get('lr')
-    opt_lr = lr_cfg['warmup_peak'] if lr_cfg else training_cfg['learning_rate']
+    opt_lr = lr_cfg['peak'] if lr_cfg else training_cfg['learning_rate']
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
