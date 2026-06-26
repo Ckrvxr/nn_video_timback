@@ -9,7 +9,7 @@ import optax
 from core import ICtCpNetV2
 from utils.console import console, section, sub_section, metric, divider
 from utils.loss.composite import CompositeLoss
-from utils.learn.validate import validate, baseline_yuv
+from utils.learn.validate import validate, baseline_clip
 
 
 def build_model_and_optimizer(config):
@@ -169,7 +169,7 @@ def compute_baseline(config, val_clips, model, params, logging_cfg, run_dir, out
             n = 0
             for clip in clips:
                 try:
-                    m = baseline_yuv(clip)
+                    m = baseline_clip(clip)
                     for k in total:
                         total[k] += m[k]
                     n += 1

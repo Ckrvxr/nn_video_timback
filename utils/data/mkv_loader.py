@@ -1,8 +1,4 @@
-"""MKV video batch loader for JAX training — ffmpeg pipe + JAX GPU colour conversion.
-
-YUV ↔ ICtCp conversion runs on GPU via JAX, ensuring the forward (decode) and
-reverse (encode) transforms use identical floating-point math.
-"""
+"""MKV video batch loader — ffmpeg pipe + JAX GPU colour conversion."""
 
 import json
 import subprocess
@@ -22,11 +18,8 @@ from utils.colorspace.color_space import (
 
 def _yuv12_to_ictcp(x: jnp.ndarray) -> jnp.ndarray:
     """YUV (12-bit normalized [0,1] / [-0.5,0.5]) → ICtCp.  NHWC."""
-    # x[..., 0] = Y/peak  ∈ [0, 1]
-    # x[..., 1] = (U - center)/peak  ∈ [-0.5, 0.5]
-    # x[..., 2] = (V - center)/peak  ∈ [-0.5, 0.5]
     rgb_nl = x @ _M_YUV2RGB.T
-    rgb_nl = jnp.clip(rgb_nl, 0.0, 1.0)
+    rgb_nl = jnp.clip(rgb_nl, 0.0, None)
     rgb_lin = eotf_pq(rgb_nl)
     lms = rgb_lin @ _M_RGB2LMS.T
     lms_p = oetf_pq(lms)
@@ -49,7 +42,7 @@ def _yuv_to_ictcp_gpu(yuv: np.ndarray) -> np.ndarray:
     return np.asarray(ictcp)
 
 
-# ── FFmpeg pipe (CPU decode) ──────────────────────────────────────────
+# ── FFmpeg pipe ───────────────────────────────────────────────────────
 
 def _ffmpeg_to_yuv(path: Path) -> np.ndarray:
     """Decode MKV to raw YUV uint16 array [N, H, W, 3] via ffmpeg pipe.
@@ -86,12 +79,7 @@ def _ffmpeg_to_yuv(path: Path) -> np.ndarray:
 # ── Public API ────────────────────────────────────────────────────────
 
 def _decode_clip(lr_path, hr_path):
-    """Decode a single clip → (lr, hr) as [N, H, W, 3] float32 ICtCp.
-
-    Uses ffmpeg pipe (CPU) for MKV → raw YUV, then JAX (GPU) for YUV → ICtCp.
-    The forward math matches `ictcp_to_yuv_np` used during validation, so the
-    round-trip error is the minimum achievable with float32 PQ arithmetic.
-    """
+    """Decode a single clip → (lr, hr) as [N, H, W, 3] float32 ICtCp via GPU."""
     lr_yuv = _ffmpeg_to_yuv(lr_path)
     hr_yuv = _ffmpeg_to_yuv(hr_path)
     return _yuv_to_ictcp_gpu(lr_yuv), _yuv_to_ictcp_gpu(hr_yuv)
@@ -125,10 +113,9 @@ def discover_clips(paths):
 def load_mkv_batch(paths, batch_size, shuffle=True, frames=1):
     """Generator that yields (lr_batch, hr_batch) float32 arrays from MKV clips.
 
-    Each clip is decoded via ffmpeg pipe → JAX GPU colour conversion.
+    Each clip is decoded via ffmpeg pipe → numpy colour conversion (CPU).
     When shuffle=True (training), performs a single shuffled pass over the clips
     (the caller creates a fresh generator each epoch to reshuffle).
-    frames=1 only (multi-frame not supported).
     """
     clips = discover_clips(paths)
     if not clips:

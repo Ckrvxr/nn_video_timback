@@ -152,6 +152,8 @@ def ictcp_to_yuv_np(ictcp: np.ndarray, bits: int = 8) -> np.ndarray:
     yuv_n[..., 0] *= peak
     yuv_n[..., 1] = yuv_n[..., 1] * peak + center
     yuv_n[..., 2] = yuv_n[..., 2] * peak + center
+    # Guard against uint16 wraparound from float round-trip noise.
+    yuv_n = np.clip(yuv_n, 0.0, peak * 2)
     if bits > 8:
         return np.round(yuv_n).astype(np.uint16)
     return np.round(yuv_n).astype(np.uint8)

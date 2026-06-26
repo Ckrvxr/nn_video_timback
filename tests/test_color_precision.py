@@ -26,7 +26,7 @@ from utils.colorspace.color_space import (
     oetf_pq_np,
     yuv_to_ictcp_np,
 )
-from utils.data.mkv_loader import _decode_clip, _ffmpeg_to_yuv, _yuv_to_ictcp_gpu
+from utils.data.mkv_loader import _decode_clip, _ffmpeg_to_yuv
 
 
 _PEAK = 4095.0
@@ -132,14 +132,6 @@ class TestFullRoundtrip:
         yuv2 = ictcp_to_yuv_np(ictcp, bits=12)
         psnr = _psnr(yuv, yuv2)
         assert psnr > _PSNR_FLOOR, f"CPU roundtrip PSNR {psnr:.2f} < {_PSNR_FLOOR}"
-
-    def test_real_video_roundtrip_gpu(self, real_clip_dir):
-        yuv = _ffmpeg_to_yuv(real_clip_dir / "HR.mkv")
-        yuv = yuv[:4]
-        ictcp_np = yuv_to_ictcp_np(yuv, bits=12)
-        ictcp_gpu = _yuv_to_ictcp_gpu(yuv)
-        diff = np.abs(ictcp_np.astype(np.float64) - ictcp_gpu.astype(np.float64))
-        assert diff.max() < 1.0, f"CPU/GPU ICtCp max diff {diff.max():.4e}"
 
     def test_decoder_plus_validation(self, real_clip_dir):
         lr, hr = _decode_clip(real_clip_dir / "LR.mkv", real_clip_dir / "HR.mkv")

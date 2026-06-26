@@ -18,6 +18,7 @@ def ffmpeg_metrics(ref_path, dist_path, width=512, height=512,
     cmd = ['ffmpeg', '-vsync', '0', '-hide_banner']
     if is_raw:
         cmd += ['-f', 'rawvideo', '-pix_fmt', pix_fmt,
+                '-color_range', 'pc',
                 '-s', f'{width}x{height}', '-r', str(framerate),
                 '-i', str(dist_path)]
     else:
