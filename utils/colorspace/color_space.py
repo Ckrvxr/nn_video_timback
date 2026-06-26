@@ -1,4 +1,3 @@
-import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -168,7 +167,8 @@ def rgb_to_ictcp_np(rgb: np.ndarray) -> np.ndarray:
 def ictcp_to_rgb_np(ictcp: np.ndarray) -> np.ndarray:
     lms_p = ictcp @ MAT_ICTCP2LMS.T
     lms = eotf_pq_np(lms_p)
-    return lms @ MAT_LMS2RGB.T
+    rgb = lms @ MAT_LMS2RGB.T
+    return np.clip(rgb, 0.0, 1.0)
 
 
 # ── JAX Conversions (NHWC [B, H, W, C]) ───────────────────────────────
@@ -211,7 +211,8 @@ def rgb_to_ictcp(x: jnp.ndarray) -> jnp.ndarray:
 def ictcp_to_rgb(x: jnp.ndarray) -> jnp.ndarray:
     lms_p = x @ _M_ICTCP2LMS.T
     lms = eotf_pq(lms_p)
-    return lms @ _M_LMS2RGB.T
+    rgb = lms @ _M_LMS2RGB.T
+    return jnp.clip(rgb, 0.0, 1.0)
 
 
 def yuv_to_rgb(x: jnp.ndarray) -> jnp.ndarray:
