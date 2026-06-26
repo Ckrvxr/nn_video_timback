@@ -29,10 +29,9 @@ class Fusion(nn.Module):
         ca = nn.Conv(features=3, kernel_size=(1, 1), use_bias=True)(gap)
         ca = nn.sigmoid(ca)
         x = x * ca
-        x = nn.Conv(features=3, kernel_size=(3, 3), padding='SAME', use_bias=True,
-                    kernel_init=nn.initializers.zeros)(x)
+        x = nn.Conv(features=3, kernel_size=(3, 3), padding='SAME', use_bias=True)(x)
         x = jnp.tanh(x)
-        scale = self.param('delta_scale', lambda rng, shape: jnp.array([0.25, 0.04, 0.04]), (3,))
+        scale = self.param('delta_scale', lambda rng, shape: jnp.array([0.5, 0.08, 0.08]), (3,))
         return x * scale.reshape(1, 1, 1, 3)
 
 def pixel_unshuffle(x, r):
