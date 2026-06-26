@@ -21,7 +21,7 @@ def get_epoch_weights(epoch_idx: int, schedule: list, fallback: dict) -> dict | 
 
 
 def log_validation(name: str, psnr: float, ssim: float, vmaf: float,
-                   baseline: dict | None):
+                   baseline: dict | None, vgg: float | None = None):
     bl = baseline.get(name, {}) if baseline else {}
     psnr_delta = ""
     ssim_delta = ""
@@ -36,9 +36,13 @@ def log_validation(name: str, psnr: float, ssim: float, vmaf: float,
             d = vmaf - bl['vmaf']
             vmaf_delta = f" ({'+' if d >= 0 else ''}{d:.2f})"
     vmaf_color = "green" if vmaf >= 80 else ("yellow" if vmaf >= 60 else "red")
+    vgg_str = ""
+    if vgg is not None:
+        vgg_str = f"  vgg={vgg:.6f}"
     color_msg = (
         f"  <white>{{}}</white>"
         f"  <dim>psnr={{:.2f}}{psnr_delta}  ssim={{:.4f}}{ssim_delta}</dim>"
+        f"{vgg_str}"
     )
     if vmaf > 0:
         color_msg += f"  <{vmaf_color}>vmaf={{:.2f}}{vmaf_delta}</{vmaf_color}>"

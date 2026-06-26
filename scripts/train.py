@@ -123,14 +123,15 @@ def main():
             if epoch % logging_cfg.get('validation_interval', 1) == 0:
                 section(f"Epoch {epoch+1}/{n_epochs}  —  loss={train_loss:.8f}")
                 for name, clips in val_clips.items():
-                    psnr = ssim = vmaf = float('nan')
+                    psnr = ssim = vmaf = vgg = float('nan')
                     try:
-                        psnr, ssim, vmaf = validate(model, params, clips,
-                                                    val_batch_size, name)
+                        psnr, ssim, vmaf, vgg = validate(model, params, clips,
+                                                        val_batch_size, name)
                     except Exception as e:
                         console.error(f"RGB validation failed for {name}: {e}")
-                    metrics[name] = {'psnr': psnr, 'ssim': ssim, 'vmaf': vmaf}
-                    log_validation(name, psnr, ssim, vmaf, baseline)
+                    metrics[name] = {'psnr': psnr, 'ssim': ssim, 'vmaf': vmaf,
+                                     'vgg': vgg}
+                    log_validation(name, psnr, ssim, vmaf, baseline, vgg=vgg)
                 avg_lr = float(lr_schedule_fn(epoch + n_batches / max(n_batches, 1)))
                 divider()
 

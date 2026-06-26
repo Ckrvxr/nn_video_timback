@@ -18,6 +18,7 @@ from utils.colorspace import ictcp_to_rgb_np
 from utils.console import console
 from utils.data.mkv_loader import _decode_clip
 from utils.evaluation.metrics import calculate_psnr_batch, calculate_ssim_batch
+from utils.learn.perceptual import vgg_distance
 
 
 def _release_jax_memory():
@@ -74,11 +75,11 @@ def _vmaf_8bit_png(pred_ictcp: np.ndarray, target_ictcp: np.ndarray) -> float:
 
 
 def _clip_rgb_metrics(pred_ictcp: np.ndarray, target_ictcp: np.ndarray) -> dict:
-    """Return ``{'psnr', 'ssim', 'vmaf'}`` from ICtCp tensors.
+    """Return ``{'psnr', 'ssim', 'vmaf', 'vgg'}`` from ICtCp tensors.
 
     PSNR/SSIM in linear RGB [0, 1] via ``ictcp_to_rgb_np`` (float64 arithmetic,
     clip to [0, 1]), matching the training loss space.  No YUV ceiling.
-    VMAF from 8-bit PNG screenshots.
+    VMAF from 8-bit PNG screenshots.  VGG from perceptual feature space.
     """
     pred_rgb = ictcp_to_rgb_np(pred_ictcp)
     target_rgb = ictcp_to_rgb_np(target_ictcp)
@@ -86,8 +87,10 @@ def _clip_rgb_metrics(pred_ictcp: np.ndarray, target_ictcp: np.ndarray) -> dict:
     psnr = float(calculate_psnr_batch(pred_rgb, target_rgb, max_val=1.0).mean())
     ssim = float(calculate_ssim_batch(pred_rgb, target_rgb, max_val=1.0).mean())
     vmaf = _vmaf_8bit_png(pred_ictcp, target_ictcp)
+    # VGG on first 4 frames (to keep GPU memory within limits)
+    vgg = vgg_distance(pred_rgb[:4], target_rgb[:4]) if len(pred_rgb) >= 4 else vgg_distance(pred_rgb, target_rgb)
 
-    return {'psnr': psnr, 'ssim': ssim, 'vmaf': vmaf}
+    return {'psnr': psnr, 'ssim': ssim, 'vmaf': vmaf, 'vgg': vgg}
 
 
 def validate_clip_rgb(jit_apply, params, lr_path, hr_path, batch_size=16):
@@ -111,7 +114,7 @@ def validate_clip_rgb(jit_apply, params, lr_path, hr_path, batch_size=16):
 def validate(model, params, clips, batch_size, name):
     """Validate across all clips: RGB float32 PSNR/SSIM, PNG VMAF."""
     jit_apply = jax.jit(lambda p, x: model.apply(p, x))
-    total = {'psnr': 0.0, 'ssim': 0.0, 'vmaf': 0.0}
+    total = {'psnr': 0.0, 'ssim': 0.0, 'vmaf': 0.0, 'vgg': 0.0}
     n = 0
 
     _release_jax_memory()
@@ -139,8 +142,8 @@ def validate(model, params, clips, batch_size, name):
 
     if n == 0:
         console.warning(f"No clips validated for {name}")
-        return float('nan'), float('nan'), float('nan')
-    return total['psnr'] / n, total['ssim'] / n, total['vmaf'] / n
+        return float('nan'), float('nan'), float('nan'), float('nan')
+    return total['psnr'] / n, total['ssim'] / n, total['vmaf'] / n, total.get('vgg', 0.0) / n
 
 
 def baseline_clip(clip):

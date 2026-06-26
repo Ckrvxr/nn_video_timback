@@ -165,7 +165,7 @@ def compute_baseline(config, val_clips, model, params, logging_cfg, run_dir, out
         sub_section("Computing Baseline")
         baseline = {}
         for name, clips in val_clips.items():
-            total = {'psnr': 0.0, 'ssim': 0.0, 'vmaf': 0.0}
+            total = {'psnr': 0.0, 'ssim': 0.0, 'vmaf': 0.0, 'vgg': 0.0}
             n = 0
             for clip in clips:
                 try:
@@ -179,10 +179,11 @@ def compute_baseline(config, val_clips, model, params, logging_cfg, run_dir, out
                 b_psnr = total['psnr'] / n
                 b_ssim = total['ssim'] / n
                 b_vmaf = total['vmaf'] / n
+                b_vgg = total.get('vgg', 0.0) / n
             else:
-                b_psnr = b_ssim = b_vmaf = float('nan')
-            baseline[name] = {'psnr': b_psnr, 'ssim': b_ssim, 'vmaf': b_vmaf}
-            metric(name, f"psnr={b_psnr:.2f}  ssim={b_ssim:.4f}  vmaf={b_vmaf:.4f}")
+                b_psnr = b_ssim = b_vmaf = b_vgg = float('nan')
+            baseline[name] = {'psnr': b_psnr, 'ssim': b_ssim, 'vmaf': b_vmaf, 'vgg': b_vgg}
+            metric(name, f"psnr={b_psnr:.2f}  ssim={b_ssim:.4f}  vmaf={b_vmaf:.4f}  vgg={b_vgg:.6f}")
         json.dump(baseline, open(baseline_path, 'w'))
     json.dump(baseline, open(run_dir / 'baseline.json', 'w'))
     divider()
