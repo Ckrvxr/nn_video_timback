@@ -24,15 +24,12 @@ class Fusion(nn.Module):
         super().__init__()
         self.ca = nn.Conv2d(3, 3, 1, bias=True)
         self.conv = nn.Conv2d(3, 3, 3, padding=1, bias=True)
-        delta_scale = torch.tensor([0.1, 0.1, 0.1])
-        self.delta_scale = nn.Parameter(delta_scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gap = x.mean(dim=(2, 3), keepdim=True)
         ca = torch.sigmoid(self.ca(gap))
         x = x * ca
-        x = torch.tanh(self.conv(x))
-        return x * self.delta_scale.view(1, -1, 1, 1)
+        return self.conv(x)
 
 
 def haar_dwt(x: torch.Tensor):

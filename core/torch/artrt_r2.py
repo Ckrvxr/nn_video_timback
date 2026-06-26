@@ -9,6 +9,7 @@ class ArtRT(nn.Module):
     def __init__(self, d_model: int = 48, d_state: int = 32):
         super().__init__()
         self.body = VMambaBlock(d_model, d_state=d_state)
+        self.refine = nn.Conv2d(12, 3, 5, padding=2, bias=False)
         self.fusion = Fusion()
 
     def forward(self, x):
@@ -16,6 +17,7 @@ class ArtRT(nn.Module):
         h = pixel_unshuffle(LL, 4)
         h = self.body(h)
         h = pixel_shuffle(h, 4)
+        h = self.refine(torch.cat([h, LH, HL, HH], dim=1))
         delta = haar_iwt(h, LH, HL, HH)
         delta = self.fusion(delta)
         return x + delta
