@@ -45,7 +45,7 @@ def build_model_and_optimizer(config):
     if schedule:
         initial_weights = dict(schedule[0]['weights'])
     else:
-        initial_weights = {'charbonnier': 1.0, 'rgb': 0.0, 'haarpsi': 0.0}
+        initial_weights = {'charbonnier': 1.0, 'haarpsi': 0.0}
     criterion = CompositeLoss(initial_weights)
 
     sub_section("Training")
@@ -124,7 +124,7 @@ class MKVIterableDataset(IterableDataset):
         import numpy as np
         import torch
         from utils.data.mkv_loader import decode_yuv
-        from utils.colorspace.color_space import yuv_to_ictcp_cuda
+        from utils.colorspace.color_space import yuv_to_rgb_linear_cuda
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         clips = list(self.clip_list)
@@ -145,13 +145,12 @@ class MKVIterableDataset(IterableDataset):
             for start in range(0, n, bs):
                 end = min(start + bs, n)
                 actual_bs = end - start
-                lr_buf[:actual_bs] = torch.from_numpy(lr_yuv[start:end].copy())
-                hr_buf[:actual_bs] = torch.from_numpy(hr_yuv[start:end].copy())
+                lr_buf[:actual_bs] = torch.from_numpy(np.ascontiguousarray(lr_yuv[start:end]))
+                hr_buf[:actual_bs] = torch.from_numpy(np.ascontiguousarray(hr_yuv[start:end]))
                 lr_gpu[:actual_bs].copy_(lr_buf[:actual_bs], non_blocking=True)
                 hr_gpu[:actual_bs].copy_(hr_buf[:actual_bs], non_blocking=True)
-                lr = yuv_to_rgb_linear_cuda(lr_gpu[:actual_bs].contiguous())
-                hr = yuv_to_rgb_linear_cuda(hr_gpu[:actual_bs].contiguous())
-                torch.cuda.synchronize()
+                lr = yuv_to_rgb_linear_cuda(lr_gpu[:actual_bs])
+                hr = yuv_to_rgb_linear_cuda(hr_gpu[:actual_bs])
                 yield lr, hr
 
 
@@ -223,7 +222,8 @@ def compute_baseline(config, val_clips, logging_cfg, run_dir, output_dir):
         'val_dataset_paths': dataset_cfg.get('val_dataset_paths'),
         'patch_size': dataset_cfg.get('patch_size'),
         'model_name': model_cfg.get('model_name'),
-        'scale': model_cfg.get('scale'),
+        'd_model': model_cfg.get('d_model'),
+        'd_state': model_cfg.get('d_state'),
     }, sort_keys=True)
     cfg_hash = hashlib.md5(config_hash_payload.encode()).hexdigest()[:8]
     baseline_path = output_dir / f'baseline_{cfg_hash}.json'
