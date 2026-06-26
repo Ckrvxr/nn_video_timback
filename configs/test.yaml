@@ -15,10 +15,10 @@ dataset:
 model_architecture:
   model_name: ArtRT
   dim: 48
-  n1: 2
-  n2: 6
-  n3: 8
-  nmid: 12
+  n1: 6
+  n2: 8
+  n3: 4
+  nmid: 4
   compile: default
 
 training_settings:

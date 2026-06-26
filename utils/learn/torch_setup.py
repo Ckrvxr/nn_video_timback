@@ -25,10 +25,10 @@ def build_model_and_optimizer(config):
     metric("Name", model_name)
 
     dim = model_cfg.get('dim', 48)
-    n1 = model_cfg.get('n1', 2)
-    n2 = model_cfg.get('n2', 6)
-    n3 = model_cfg.get('n3', 8)
-    nmid = model_cfg.get('nmid', 12)
+    n1 = model_cfg.get('n1', 6)
+    n2 = model_cfg.get('n2', 8)
+    n3 = model_cfg.get('n3', 4)
+    nmid = model_cfg.get('nmid', 4)
 
     model = ArtRT(dim=dim, n1=n1, n2=n2, n3=n3, nmid=nmid)
     n_params = sum(p.numel() for p in model.parameters())
