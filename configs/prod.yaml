@@ -18,10 +18,9 @@ dataset:
   validation_batch_size: 2
 
 model_architecture:
-  model_name: ArtRT_R1
-  scale: 8
-  # detail_path: false
-  # multi_frame: false
+  model_name: ArtRT_R2
+  d_model: 48
+  d_state: 32
 
 training_settings:
   batch_size: 10

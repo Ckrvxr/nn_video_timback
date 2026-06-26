@@ -1,8 +1,1 @@
-from .artrt_r1 import ICtCpNetV2 as ICtCpNetV2
-from .artrt_r1 import DSConv as DSConv
-from .artrt_r1 import HeavyBranch as HeavyBranch
-from .artrt_r1 import LightBranch as LightBranch
-from .artrt_r1 import DetailPath as DetailPath
-from .artrt_r1 import ResBlock as ResBlock
-from .artrt_r1 import Fusion as Fusion
-
+from core.torch.artrt_r2 import ICtCpNetR2 as ICtCpNetR2

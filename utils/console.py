@@ -25,5 +25,9 @@ def metric(key: str, value: str):
     console.opt(colors=True).info("  <white>{}</white> <green>{}</green>", f"{key}:", value)
 
 
+def detail(key: str, value: str):
+    console.opt(colors=True).info("    <dim>{}</dim> <green>{}</green>", f"{key}:", value)
+
+
 def divider():
     console.opt(colors=True).info("<dim>──────────────────────────────────────</dim>")

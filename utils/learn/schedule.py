@@ -37,13 +37,17 @@ def log_validation(name: str, psnr: float, ssim: float, vmaf: float,
             vmaf_delta = f" ({'+' if d >= 0 else ''}{d:.2f})"
     vmaf_color = "green" if vmaf >= 80 else ("yellow" if vmaf >= 60 else "red")
     vgg_str = ""
+    vgg_delta = ""
     if vgg is not None:
-        vgg_str = f"  vgg={vgg:.6f}"
+        if bl and 'vgg' in bl:
+            d = vgg - bl['vgg']
+            vgg_delta = f" ({'+' if d >= 0 else ''}{d:.6f})"
+        vgg_str = f"  vgg={vgg:.6f}{vgg_delta}"
     color_msg = (
         f"  <white>{{}}</white>"
         f"  <dim>psnr={{:.2f}}{psnr_delta}  ssim={{:.4f}}{ssim_delta}</dim>"
-        f"{vgg_str}"
     )
     if vmaf > 0:
         color_msg += f"  <{vmaf_color}>vmaf={{:.2f}}{vmaf_delta}</{vmaf_color}>"
+    color_msg += vgg_str
     console.opt(colors=True).info(color_msg, name, psnr, ssim, vmaf)

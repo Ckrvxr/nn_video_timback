@@ -1,5 +1,10 @@
-import jax.numpy as jnp
 import numpy as np
+import torch
+
+try:
+    import jax.numpy as jnp
+except ImportError:
+    jnp = None
 
 
 # ── PQ Constants (float64 for internal EOTF/OETF accuracy)
@@ -58,13 +63,14 @@ MAT_LMS2ICTCP = np.array([
 MAT_ICTCP2LMS = np.linalg.inv(MAT_LMS2ICTCP)
 
 
-# ── JAX Matrices (float32 copies for JIT efficiency)
-_M_YUV2RGB = jnp.array(MAT_BT2020_YUV2RGB.astype(np.float32))
-_M_RGB2YUV = jnp.array(MAT_RGB2YUV.astype(np.float32))
-_M_RGB2LMS = jnp.array(MAT_RGB2LMS.astype(np.float32))
-_M_LMS2RGB = jnp.array(MAT_LMS2RGB.astype(np.float32))
-_M_LMS2ICTCP = jnp.array(MAT_LMS2ICTCP.astype(np.float32))
-_M_ICTCP2LMS = jnp.array(MAT_ICTCP2LMS.astype(np.float32))
+# ── JAX Matrices (float32 copies for JIT efficiency, only if JAX available)
+if jnp is not None:
+    _M_YUV2RGB = jnp.array(MAT_BT2020_YUV2RGB.astype(np.float32))
+    _M_RGB2YUV = jnp.array(MAT_RGB2YUV.astype(np.float32))
+    _M_RGB2LMS = jnp.array(MAT_RGB2LMS.astype(np.float32))
+    _M_LMS2RGB = jnp.array(MAT_LMS2RGB.astype(np.float32))
+    _M_LMS2ICTCP = jnp.array(MAT_LMS2ICTCP.astype(np.float32))
+    _M_ICTCP2LMS = jnp.array(MAT_ICTCP2LMS.astype(np.float32))
 
 
 # ── PQ Transfer Functions
@@ -98,25 +104,6 @@ def oetf_pq_np(lin: np.ndarray) -> np.ndarray:
     num = C1_f64 + C2_f64 * l_pow
     den = 1.0 + C3_f64 * l_pow
     return np.power(num / den, M2_f64).astype(np.float32)
-
-
-# ── Float32 JAX versions (used by the GPU pipeline) ───────────────────
-
-def eotf_pq(v):
-    v = jnp.clip(v, 0.0, _EOTF_V_MAX)
-    v_safe = jnp.maximum(v, 1e-10)
-    v_pow = v_safe ** INV_M2_f32
-    num = jnp.maximum(v_pow - C1_f32, 0.0)
-    den = C2_f32 - C3_f32 * v_pow
-    return (num / (den + EPS_f32)) ** INV_M1_f32
-
-
-def oetf_pq(lin):
-    lin = jnp.maximum(lin, 0.0)
-    l_pow = lin ** M1_f32
-    num = C1_f32 + C2_f32 * l_pow
-    den = 1.0 + C3_f32 * l_pow
-    return (num / den) ** M2_f32
 
 
 # ── Numpy Conversions (BT.2100 ICtCp) ─────────────────────────────────
@@ -171,64 +158,55 @@ def ictcp_to_rgb_np(ictcp: np.ndarray) -> np.ndarray:
     return np.clip(rgb, 0.0, 1.0)
 
 
-# ── JAX Conversions (NHWC [B, H, W, C]) ───────────────────────────────
+# ── PyTorch Conversions (NCHW [B, C, H, W]) ────────────────────────────
 
-def yuv_to_ictcp(x: jnp.ndarray) -> jnp.ndarray:
-    """YUV (normalized [-1,1]) → ICtCp. Input: [B,H,W,3] NHWC."""
-    yuv = (x + 1) * 127.5
-    y = yuv[..., 0:1] / 255.0
-    u = (yuv[..., 1:2] - 128.0) / 255.0
-    v = (yuv[..., 2:3] - 128.0) / 255.0
-    yuv_s = jnp.concatenate([y, u, v], axis=-1)
-    rgb_nl = yuv_s @ _M_YUV2RGB.T
-    rgb_nl = jnp.clip(rgb_nl, 0.0, None)
-    rgb_lin = eotf_pq(rgb_nl)
-    lms = rgb_lin @ _M_RGB2LMS.T
-    lms_p = oetf_pq(lms)
-    return lms_p @ _M_LMS2ICTCP.T
+def ictcp_to_rgb_torch(x: torch.Tensor) -> torch.Tensor:
+    """ICtCp → linear RGB [0,1]. Input: [B,3,H,W] NCHW. Output: [B,3,H,W]."""
+    dt = x.dtype
+    mat1 = torch.tensor(MAT_ICTCP2LMS.T.astype(np.float32), device=x.device, dtype=dt)
+    lms_p = x.permute(0, 2, 3, 1) @ mat1
+    lms = _eotf_pq_torch(lms_p.permute(0, 3, 1, 2))
+    mat2 = torch.tensor(MAT_LMS2RGB.T.astype(np.float32), device=x.device, dtype=lms.dtype)
+    rgb = lms.permute(0, 2, 3, 1) @ mat2
+    return rgb.permute(0, 3, 1, 2).clamp(0.0, 1.0).to(dt)
 
 
-def ictcp_to_yuv(x: jnp.ndarray) -> jnp.ndarray:
-    """ICtCp → YUV (normalized [-1,1]). Input: [B,H,W,3] NHWC."""
-    lms_p = x @ _M_ICTCP2LMS.T
-    lms = eotf_pq(lms_p)
-    rgb_lin = lms @ _M_LMS2RGB.T
-    rgb_nl = oetf_pq(rgb_lin)
-    yuv = rgb_nl @ _M_RGB2YUV.T
-
-    y = yuv[..., 0:1] * 2.0 - 1.0
-    u = yuv[..., 1:2] * 2.0
-    v = yuv[..., 2:3] * 2.0
-    return jnp.concatenate([y, u, v], axis=-1)
+def _eotf_pq_torch(v: torch.Tensor) -> torch.Tensor:
+    v = v.float().clamp(0.0, _EOTF_V_MAX).double()
+    v_pow = v ** INV_M2_f64
+    num = (v_pow - C1_f64).clamp(min=0.0)
+    den = (C2_f64 - C3_f64 * v_pow).clamp(min=EPS_f64)
+    return ((num / den) ** INV_M1_f64).float()
 
 
-def rgb_to_ictcp(x: jnp.ndarray) -> jnp.ndarray:
-    lms = x @ _M_RGB2LMS.T
-    lms_p = oetf_pq(lms)
-    return lms_p @ _M_LMS2ICTCP.T
+def _oetf_pq_torch(lin: torch.Tensor) -> torch.Tensor:
+    """Linear luminance → PQ code.  float32 in/out."""
+    lin = lin.float().clamp(min=0.0)
+    l_pow = lin ** M1_f32
+    num = C1_f32 + C2_f32 * l_pow
+    den = 1.0 + C3_f32 * l_pow
+    return (num / den) ** M2_f32
 
 
-def ictcp_to_rgb(x: jnp.ndarray) -> jnp.ndarray:
-    lms_p = x @ _M_ICTCP2LMS.T
-    lms = eotf_pq(lms_p)
-    rgb = lms @ _M_LMS2RGB.T
-    return jnp.clip(rgb, 0.0, 1.0)
+def yuv_to_ictcp_cuda(yuv: torch.Tensor, bits: int = 12) -> torch.Tensor:
+    """YUV uint16 → ICtCp bf16 NCHW.  GPU-only.  Input: [B,H,W,3] uint16."""
+    peak = float((1 << bits) - 1)
+    center = float(1 << (bits - 1))
+    f = yuv.float()
+    y = f[..., 0:1] / peak
+    u = (f[..., 1:2] - center) / peak
+    v = (f[..., 2:3] - center) / peak
+    yuv_n = torch.cat([y, u, v], dim=-1)
 
+    mat1 = torch.tensor(MAT_BT2020_YUV2RGB.T.astype(np.float32), device=yuv.device)
+    rgb_nl = yuv_n @ mat1
+    rgb_nl = rgb_nl.clamp(min=0.0)
+    rgb_lin = _eotf_pq_torch(rgb_nl.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
 
-def yuv_to_rgb(x: jnp.ndarray) -> jnp.ndarray:
-    yuv = (x + 1) * 127.5
-    yuv_s = yuv[..., :3]
-    y_ch = yuv_s[..., 0:1]
-    u_ch = yuv_s[..., 1:2] - 128.0
-    v_ch = yuv_s[..., 2:3] - 128.0
-    rgb = (y_ch * _M_YUV2RGB[0] + u_ch * _M_YUV2RGB[1] + v_ch * _M_YUV2RGB[2])
-    return rgb / 127.5 - 1.0
+    mat2 = torch.tensor(MAT_RGB2LMS.T.astype(np.float32), device=yuv.device)
+    lms = rgb_lin @ mat2
+    lms_p = _oetf_pq_torch(lms.permute(0, 3, 1, 2))
 
-
-def rgb_to_yuv(x: jnp.ndarray) -> jnp.ndarray:
-    rgb = (x + 1) * 127.5
-    r_ch, g_ch, b_ch = rgb[..., 0:1], rgb[..., 1:2], rgb[..., 2:3]
-    y = r_ch * _M_RGB2YUV[0, 0] + g_ch * _M_RGB2YUV[0, 1] + b_ch * _M_RGB2YUV[0, 2]
-    u = r_ch * _M_RGB2YUV[1, 0] + g_ch * _M_RGB2YUV[1, 1] + b_ch * _M_RGB2YUV[1, 2] + 128.0
-    v = r_ch * _M_RGB2YUV[2, 0] + g_ch * _M_RGB2YUV[2, 1] + b_ch * _M_RGB2YUV[2, 2] + 128.0
-    return jnp.concatenate([y, u, v], axis=-1) / 127.5 - 1.0
+    mat3 = torch.tensor(MAT_LMS2ICTCP.T.astype(np.float32), device=yuv.device)
+    ictcp = lms_p.permute(0, 2, 3, 1) @ mat3
+    return ictcp.permute(0, 3, 1, 2).bfloat16()

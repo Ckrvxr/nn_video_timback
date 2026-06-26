@@ -1,0 +1,21 @@
+import torch
+import torch.nn as nn
+
+from core.torch.modules import pixel_unshuffle, pixel_shuffle, haar_dwt, haar_iwt, Fusion
+from core.torch.ssm_block import VMambaBlock
+
+
+class ICtCpNetR2(nn.Module):
+    def __init__(self, d_model: int = 48, d_state: int = 32):
+        super().__init__()
+        self.body = VMambaBlock(d_model, d_state=d_state)
+        self.fusion = Fusion()
+
+    def forward(self, x):
+        LL, LH, HL, HH = haar_dwt(x)
+        h = pixel_unshuffle(LL, 4)
+        h = self.body(h)
+        h = pixel_shuffle(h, 4)
+        delta = haar_iwt(h, LH, HL, HH)
+        delta = self.fusion(delta)
+        return x + delta
