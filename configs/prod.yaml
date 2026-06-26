@@ -2,6 +2,7 @@ output_directory: runs/production
 random_seed: 42
 
 dataset:
+  mirror: true
   dataset_paths:
     - ./datasets/synthetic
     - ./datasets/cantoon/monsters_university

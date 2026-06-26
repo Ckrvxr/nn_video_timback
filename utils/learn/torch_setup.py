@@ -86,11 +86,12 @@ def build_lr_schedule(config):
 
 
 class MKVIterableDataset(IterableDataset):
-    def __init__(self, clip_list, batch_size, prefetch=2, shuffle=True):
+    def __init__(self, clip_list, batch_size, prefetch=2, shuffle=True, mirror=False):
         self.clip_list = clip_list
         self.batch_size = batch_size
         self.prefetch = prefetch
         self.shuffle = shuffle
+        self.mirror = mirror
 
     def __iter__(self):
         import queue, threading
@@ -149,6 +150,8 @@ class MKVIterableDataset(IterableDataset):
                 hr = yuv_to_rgb_linear_cuda(hr_gpu[:actual_bs])
                 torch.cuda.current_stream().synchronize()
                 yield lr, hr
+                if self.mirror:
+                    yield lr.flip(-1), hr.flip(-1)
 
 
 def build_dataloaders(config):
@@ -159,10 +162,14 @@ def build_dataloaders(config):
 
     from utils.data.mkv_loader import discover_clips
 
+    mirror = dataset_cfg.get('mirror', False)
+
     clips = discover_clips(dataset_cfg['dataset_paths'])
     total_frames = sum(c['n_frames'] for c in clips)
     bs = training_cfg['batch_size']
     n_batches = max(total_frames // bs, 1)
+    if mirror:
+        n_batches *= 2
 
     metric("Training", f"{len(dataset_cfg['dataset_paths'])} sources")
     for p in dataset_cfg['dataset_paths']:
@@ -173,7 +180,9 @@ def build_dataloaders(config):
     metric("Batch size", str(bs))
     metric("Batches/epoch", str(n_batches))
 
-    dataset = MKVIterableDataset(clips, bs, shuffle=True)
+    dataset = MKVIterableDataset(clips, bs, shuffle=True, mirror=mirror)
+    if mirror:
+        metric("Mirror", "horizontal flip (2× data)")
 
     def make_train_loader():
         return DataLoader(dataset, batch_size=None, num_workers=0)
