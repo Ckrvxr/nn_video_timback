@@ -6,12 +6,12 @@ from pathlib import Path
 
 import numpy as np
 
-from utils.colorspace.color_space import yuv_to_ictcp_np
+from utils.colorspace.color_space import yuv_to_rgb_linear_np
 
 
-def _yuv_to_ictcp_cpu(yuv: np.ndarray) -> np.ndarray:
-    """Convert YUV [N, H, W, 3] uint16 (yuv444p12le) → ICtCp float32 on CPU."""
-    return yuv_to_ictcp_np(yuv, bits=12)
+def _yuv_to_rgb_cpu(yuv: np.ndarray) -> np.ndarray:
+    """Convert YUV [N, H, W, 3] uint16 (yuv444p12le) → linear RGB float32 on CPU."""
+    return yuv_to_rgb_linear_np(yuv, bits=12)
 
 
 # ── FFmpeg pipe ───────────────────────────────────────────────────────
@@ -56,9 +56,9 @@ def decode_yuv(lr_path, hr_path):
 
 
 def _decode_clip(lr_path, hr_path):
-    """Decode a single clip → (lr, hr) as [N, H, W, 3] float32 ICtCp via numpy."""
+    """Decode a single clip → (lr, hr) as [N, H, W, 3] float32 linear RGB via numpy."""
     lr_yuv, hr_yuv = decode_yuv(lr_path, hr_path)
-    return _yuv_to_ictcp_cpu(lr_yuv), _yuv_to_ictcp_cpu(hr_yuv)
+    return _yuv_to_rgb_cpu(lr_yuv), _yuv_to_rgb_cpu(hr_yuv)
 
 
 def discover_clips(paths):

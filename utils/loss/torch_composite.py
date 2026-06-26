@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 
-from utils.colorspace.color_space import ictcp_to_rgb_torch
 from utils.loss.torch_charbonnier import charbonnier_loss
 from utils.loss.torch_haarpsi import haarpsi_loss
 
@@ -17,9 +16,7 @@ class CompositeLoss(nn.Module):
         losses = {}
         losses['char'] = charbonnier_loss(pred, target) * self.w_char
         if self.w_rgb > 0:
-            pred_rgb = ictcp_to_rgb_torch(pred)
-            target_rgb = ictcp_to_rgb_torch(target)
-            losses['rgb'] = torch.mean(torch.abs(pred_rgb - target_rgb)) * self.w_rgb
+            losses['rgb'] = torch.mean(torch.abs(pred - target)) * self.w_rgb
         else:
             losses['rgb'] = torch.tensor(0.0, device=pred.device)
         if self.w_haarpsi > 0:

@@ -176,8 +176,22 @@ def _oetf_pq_torch(lin: torch.Tensor) -> torch.Tensor:
     return (num / den) ** M2_f32
 
 
-def yuv_to_ictcp_cuda(yuv: torch.Tensor, bits: int = 12) -> torch.Tensor:
-    """YUV uint16 → ICtCp bf16 NCHW.  GPU-only.  Input: [B,H,W,3] uint16."""
+def yuv_to_rgb_linear_np(yuv: np.ndarray, bits: int = 8) -> np.ndarray:
+    """YUV uint16 → linear RGB [0,1] float32 NHWC.  CPU-only."""
+    peak = np.float32((1 << bits) - 1)
+    center = np.float32(1 << (bits - 1))
+    f = yuv.astype(np.float32)
+    f[..., 1:] -= center
+    f[..., 0] /= peak
+    f[..., 1:] /= peak
+    rgb_nl = f @ MAT_BT2020_YUV2RGB.T
+    rgb_nl = np.clip(rgb_nl, 0.0, None)
+    rgb_lin = eotf_pq_np(rgb_nl)
+    return np.clip(rgb_lin, 0.0, 1.0)
+
+
+def yuv_to_rgb_linear_cuda(yuv: torch.Tensor, bits: int = 12) -> torch.Tensor:
+    """YUV uint16 → linear RGB [0,1] bf16 NCHW.  GPU-only.  Input: [B,H,W,3] uint16."""
     peak = float((1 << bits) - 1)
     center = float(1 << (bits - 1))
     f = yuv.float()
@@ -186,15 +200,8 @@ def yuv_to_ictcp_cuda(yuv: torch.Tensor, bits: int = 12) -> torch.Tensor:
     v = (f[..., 2:3] - center) / peak
     yuv_n = torch.cat([y, u, v], dim=-1)
 
-    mat1 = torch.tensor(MAT_BT2020_YUV2RGB.T.astype(np.float32), device=yuv.device)
-    rgb_nl = yuv_n @ mat1
+    mat = torch.tensor(MAT_BT2020_YUV2RGB.T.astype(np.float32), device=yuv.device)
+    rgb_nl = yuv_n @ mat
     rgb_nl = rgb_nl.clamp(min=0.0)
-    rgb_lin = _eotf_pq_torch(rgb_nl.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
-
-    mat2 = torch.tensor(MAT_RGB2LMS.T.astype(np.float32), device=yuv.device)
-    lms = rgb_lin @ mat2
-    lms_p = _oetf_pq_torch(lms.permute(0, 3, 1, 2))
-
-    mat3 = torch.tensor(MAT_LMS2ICTCP.T.astype(np.float32), device=yuv.device)
-    ictcp = lms_p.permute(0, 2, 3, 1) @ mat3
-    return ictcp.permute(0, 3, 1, 2).bfloat16()
+    rgb_lin = _eotf_pq_torch(rgb_nl.permute(0, 3, 1, 2)).clamp(0.0, 1.0)
+    return rgb_lin.bfloat16()

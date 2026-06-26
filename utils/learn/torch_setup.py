@@ -132,9 +132,7 @@ class MKVIterableDataset(IterableDataset):
             import random
             random.shuffle(clips)
 
-        s = torch.cuda.Stream()
         bs = self.batch_size
-        _, H, W = clips[0]['n_frames'], 512, 512  # fallback shape
 
         for clip in clips:
             lr_yuv, hr_yuv = decode_yuv(clip['lr_path'], clip['hr_path'])
@@ -151,8 +149,8 @@ class MKVIterableDataset(IterableDataset):
                 hr_buf[:actual_bs] = torch.from_numpy(hr_yuv[start:end].copy())
                 lr_gpu[:actual_bs].copy_(lr_buf[:actual_bs], non_blocking=True)
                 hr_gpu[:actual_bs].copy_(hr_buf[:actual_bs], non_blocking=True)
-                lr = yuv_to_ictcp_cuda(lr_gpu[:actual_bs].contiguous())
-                hr = yuv_to_ictcp_cuda(hr_gpu[:actual_bs].contiguous())
+                lr = yuv_to_rgb_linear_cuda(lr_gpu[:actual_bs].contiguous())
+                hr = yuv_to_rgb_linear_cuda(hr_gpu[:actual_bs].contiguous())
                 torch.cuda.synchronize()
                 yield lr, hr
 

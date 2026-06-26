@@ -83,7 +83,7 @@ def train_epoch(model, loader, criterion, optimizer, config,
         optimizer.step()
         optimizer.zero_grad()
 
-        batch_loss = float(loss_val)
+        batch_loss = loss_val.detach().item()
         total_loss += batch_loss
         for k, v in loss_dict.items():
             running_losses.setdefault(k, deque(maxlen=loss_window)).append(float(v))

@@ -16,10 +16,14 @@ def haar_decomp(x: torch.Tensor):
     return LL, LH, HL, HH
 
 
+def _luminance(x: torch.Tensor) -> torch.Tensor:
+    return 0.2126 * x[:, 0:1] + 0.7152 * x[:, 1:2] + 0.0722 * x[:, 2:3]
+
+
 def haarpsi_loss(pred: torch.Tensor, target: torch.Tensor,
                  n_scales: int = 3, C: float = 0.001, alpha: float = 4.2) -> torch.Tensor:
-    pred_lum = pred[:, 0:1]
-    target_lum = target[:, 0:1]
+    pred_lum = _luminance(pred)
+    target_lum = _luminance(target)
 
     total_weight = 0.0
     total_score = 0.0

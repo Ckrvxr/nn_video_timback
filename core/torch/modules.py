@@ -24,7 +24,7 @@ class Fusion(nn.Module):
         super().__init__()
         self.ca = nn.Conv2d(3, 3, 1, bias=True)
         self.conv = nn.Conv2d(3, 3, 3, padding=1, bias=True)
-        delta_scale = torch.tensor([0.5, 0.08, 0.08])
+        delta_scale = torch.tensor([0.1, 0.1, 0.1])
         self.delta_scale = nn.Parameter(delta_scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

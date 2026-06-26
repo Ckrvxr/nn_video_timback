@@ -8,16 +8,13 @@ import numpy as np
 import torch
 from PIL import Image
 
-from utils.colorspace.color_space import ictcp_to_rgb_np
 from utils.console import console
 from utils.data.mkv_loader import _decode_clip
 from utils.evaluation.torch_metrics import calculate_psnr_batch, calculate_ssim_batch
 from utils.loss.vgg_perceptual import VGGDistance
 
 
-def _vmaf_8bit_png(pred_ictcp: np.ndarray, target_ictcp: np.ndarray) -> float:
-    pred_rgb = ictcp_to_rgb_np(pred_ictcp)
-    target_rgb = ictcp_to_rgb_np(target_ictcp)
+def _vmaf_8bit_png(pred_rgb: np.ndarray, target_rgb: np.ndarray) -> float:
     pred_u8 = (np.power(pred_rgb, 1 / 2.2) * 255).clip(0, 255).astype(np.uint8)
     target_u8 = (np.power(target_rgb, 1 / 2.2) * 255).clip(0, 255).astype(np.uint8)
     if pred_u8.ndim == 4:
@@ -59,14 +56,12 @@ def _get_vgg(device):
     return _VGG_CACHE
 
 
-def _clip_rgb_metrics(pred_ictcp: np.ndarray, target_ictcp: np.ndarray) -> dict:
-    pred_rgb = ictcp_to_rgb_np(pred_ictcp)
-    target_rgb = ictcp_to_rgb_np(target_ictcp)
+def _clip_rgb_metrics(pred_rgb: np.ndarray, target_rgb: np.ndarray) -> dict:
     pred_t = torch.from_numpy(pred_rgb).permute(0, 3, 1, 2).float()
     target_t = torch.from_numpy(target_rgb).permute(0, 3, 1, 2).float()
     psnr = float(calculate_psnr_batch(pred_t, target_t, max_val=1.0).mean())
     ssim = float(calculate_ssim_batch(pred_t, target_t, max_val=1.0).mean())
-    vmaf = _vmaf_8bit_png(pred_ictcp, target_ictcp)
+    vmaf = _vmaf_8bit_png(pred_rgb, target_rgb)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     vgg = _get_vgg(device)
     with torch.no_grad():
