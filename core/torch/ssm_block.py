@@ -5,8 +5,8 @@ from mamba_ssm import Mamba2
 
 
 class SS2D(nn.Module):
-    def __init__(self, d_model: int, d_state: int = 48, d_conv: int = 4,
-                 expand: int = 4, chunk_size: int = 512):
+    def __init__(self, d_model: int, d_state: int = 64, d_conv: int = 4,
+                 expand: int = 4, chunk_size: int = 64):
         super().__init__()
         self.scans = nn.ModuleList([
             Mamba2(d_model=d_model, d_state=d_state, d_conv=d_conv,
@@ -48,8 +48,8 @@ class LayerScale(nn.Module):
 
 
 class VMambaBlock(nn.Module):
-    def __init__(self, d_model: int, d_state: int = 48, d_conv: int = 4,
-                 expand: int = 4, chunk_size: int = 512):
+    def __init__(self, d_model: int, d_state: int = 64, d_conv: int = 4,
+                 expand: int = 4, chunk_size: int = 64):
         super().__init__()
         C = d_model
         self.norm = nn.LayerNorm(C, eps=1e-5)

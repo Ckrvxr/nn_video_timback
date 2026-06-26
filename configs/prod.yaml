@@ -20,10 +20,10 @@ dataset:
 
 model_architecture:
   model_name: ArtRT
-  d_model: 48
-  d_state: 48
+  d_model: 64
+  d_state: 64
   expand: 4
-  chunk_size: 512
+  chunk_size: 64
   compile: default
 
 training_settings:
