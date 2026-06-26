@@ -145,12 +145,13 @@ class MKVIterableDataset(IterableDataset):
             for start in range(0, n, bs):
                 end = min(start + bs, n)
                 actual_bs = end - start
-                lr_buf[:actual_bs] = torch.from_numpy(np.ascontiguousarray(lr_yuv[start:end]))
-                hr_buf[:actual_bs] = torch.from_numpy(np.ascontiguousarray(hr_yuv[start:end]))
+                lr_buf[:actual_bs] = torch.from_numpy(lr_yuv[start:end].copy())
+                hr_buf[:actual_bs] = torch.from_numpy(hr_yuv[start:end].copy())
                 lr_gpu[:actual_bs].copy_(lr_buf[:actual_bs], non_blocking=True)
                 hr_gpu[:actual_bs].copy_(hr_buf[:actual_bs], non_blocking=True)
                 lr = yuv_to_rgb_linear_cuda(lr_gpu[:actual_bs])
                 hr = yuv_to_rgb_linear_cuda(hr_gpu[:actual_bs])
+                torch.cuda.current_stream().synchronize()
                 yield lr, hr
 
 

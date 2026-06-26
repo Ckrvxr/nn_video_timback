@@ -9,17 +9,7 @@ C1 = 3424.0 / 4096.0
 C2 = 2413.0 / 4096.0 * 32.0
 C3 = 2392.0 / 4096.0 * 32.0
 
-# float32 variants (used only where float64 is not available, e.g. JAX without x64)
-M1_f32 = np.float32(M1)
-M2_f32 = np.float32(M2)
-C1_f32 = np.float32(C1)
-C2_f32 = np.float32(C2)
-C3_f32 = np.float32(C3)
-INV_M1_f32 = np.float32(1.0 / M1)
-INV_M2_f32 = np.float32(1.0 / M2)
-EPS_f32 = np.float32(1e-8)
-
-# float64 variants (used internally by numpy EOTF/OETF for stability)
+# float64 variants (used internally by EOTF for stability)
 M1_f64 = np.float64(M1)
 M2_f64 = np.float64(M2)
 C1_f64 = np.float64(C1)
@@ -30,7 +20,7 @@ INV_M2_f64 = np.float64(1.0 / M2)
 EPS_f64 = np.float64(1e-15)
 
 
-# ── BT.2020 YUV ↔ RGB Matrices
+# ── BT.2020 YUV ↔ RGB
 MAT_BT2020_YUV2RGB = np.array([
     [1.0,  0.0,       1.4746],
     [1.0, -0.1646,   -0.5714],
@@ -38,40 +28,19 @@ MAT_BT2020_YUV2RGB = np.array([
 ], dtype=np.float64)
 
 
+# ── PQ EOTF
+# ST 2084 / BT.2100: PQ code → linear luminance.
+# Singularity at V ≈ 1.99206 where denominator vanishes.
 
+_EOTF_V_MAX = 1.991
 
-
-
-
-
-# ── PQ Transfer Functions
-#
-# BT.2100 / ST 2084:
-#   EOTF: PQ code V ∈ [0, 1)  →  normalised luminance Y ∈ [0, ∞)
-#   OETF: normalised luminance Y ∈ [0, ∞)  →  PQ code V ∈ [0, 2)
-# The formulas are bijective on these ranges.  The EOTF has a singularity at
-# V ≈ (C2/C3)^(1/IM2) ≈ 1.99206 where the denominator vanishes.  We use
-# float64 arithmetic internally so that values up to V ≈ 1.991 are computed
-# accurately (covering the full BT.2020 gamut where max V ≈ 1.94).
-
-_EOTF_V_MAX = 1.991  # safely below singularity ≈ 1.99206
-
-
-# ── Float64-accelerated numpy EOTF / OETF ─────────────────────────────
 
 def eotf_pq_np(v: np.ndarray) -> np.ndarray:
-    """PQ → linear luminance.  Internally float64, returns float32."""
     v = np.clip(v, 0.0, _EOTF_V_MAX).astype(np.float64, copy=False)
     v_pow = np.power(v, INV_M2_f64)
     num = np.maximum(v_pow - C1_f64, 0.0)
     den = C2_f64 - C3_f64 * v_pow
     return np.power(num / (den + EPS_f64), INV_M1_f64).astype(np.float32)
-
-
-
-
-
-
 
 
 def _eotf_pq_torch(v: torch.Tensor) -> torch.Tensor:

@@ -86,47 +86,4 @@ def discover_clips(paths):
     return clips
 
 
-def load_mkv_batch(paths, batch_size, shuffle=True, frames=1):
-    """Generator that yields (lr_batch, hr_batch) float32 arrays from MKV clips.
 
-    Each clip is decoded via ffmpeg pipe → numpy colour conversion (CPU).
-    When shuffle=True (training), performs a single shuffled pass over the clips
-    (the caller creates a fresh generator each epoch to reshuffle).
-    """
-    clips = discover_clips(paths)
-    if not clips:
-        raise RuntimeError(f'No MKV clips found in: {paths}')
-
-    if shuffle:
-        np.random.shuffle(clips)
-
-    buf_lr = []
-    buf_hr = []
-
-    for clip in clips:
-        lr_all, hr_all = _decode_clip(clip['lr_path'], clip['hr_path'])
-
-        n = lr_all.shape[0]
-        for i in range(0, n, frames):
-            i_end = min(i + frames, n)
-            if frames > 1:
-                if i_end - i < frames:
-                    break
-                lr_concat = np.concatenate(lr_all[i:i_end], axis=-1)
-                hr_center = hr_all[i + frames // 2]
-            else:
-                lr_concat = lr_all[i]
-                hr_center = hr_all[i]
-
-            buf_lr.append(lr_concat[np.newaxis, ...])
-            buf_hr.append(hr_center[np.newaxis, ...])
-
-            if len(buf_lr) >= batch_size:
-                yield np.concatenate(buf_lr, axis=0), np.concatenate(buf_hr, axis=0)
-                buf_lr.clear()
-                buf_hr.clear()
-
-    if buf_lr:
-        yield np.concatenate(buf_lr, axis=0), np.concatenate(buf_hr, axis=0)
-        buf_lr.clear()
-        buf_hr.clear()
