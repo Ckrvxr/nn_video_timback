@@ -24,3 +24,11 @@ Thumbs.db
 # Torch
 *.pt
 *.pth
+
+# Cache
+.cache/
+
+# Test files
+*.mkv
+nature.png
+withartifact.png
