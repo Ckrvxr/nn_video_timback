@@ -1,0 +1,273 @@
+import signal
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import torch
+from torch.utils.tensorboard import SummaryWriter
+from yaml import safe_load
+
+from utils.console import console, section, metric, divider
+from utils.learn import cli
+from utils.learn.cli import sigint_handler, parse_args
+from utils.learn.io import start_io_worker, stop_io_worker, save_epoch_checkpoint
+from utils.learn.metrics import composite_score
+from utils.learn.signals import check_run_signals
+from utils.learn.schedule import get_epoch_weights, log_validation
+from utils.learn.torch_epoch import train_epoch
+from utils.learn.torch_setup import (
+    build_model_and_optimizer,
+    build_lr_schedule,
+    load_checkpoint,
+    build_dataloaders,
+    compute_baseline,
+)
+from utils.learn.torch_validate import validate
+
+
+signal.signal(signal.SIGINT, sigint_handler)
+
+
+def _fmt(v):
+    return f"{v:.8f}".rstrip("0").rstrip(".")
+
+
+def _find_latest_checkpoint(run_dir: Path) -> Path:
+    last = run_dir / "last.pkl"
+    if last.exists():
+        return last
+    epoch_ckpts = sorted(run_dir.glob("epoch_*.pkl"))
+    if not epoch_ckpts:
+        raise FileNotFoundError(f"No checkpoints found in {run_dir}")
+    return epoch_ckpts[-1]
+
+
+def main():
+    start_io_worker()
+    args = parse_args()
+    config = safe_load(open(args.config))
+
+    seed = args.seed or config.get("random_seed")
+    if seed:
+        from utils.learn.cli import set_seed
+
+        set_seed(seed)
+
+    dataset_cfg = config["dataset"]
+    logging_cfg = config["logging_settings"]
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+
+    model, optimizer, criterion, opt_cfg = build_model_and_optimizer(config)
+    model.to(device)
+
+    scaler = torch.amp.GradScaler() if dtype == torch.float16 else None
+
+    compile_mode = config.get("model_architecture", {}).get("compile", None)
+    if compile_mode:
+        torch.set_float32_matmul_precision("high")
+        model = torch.compile(model, mode=compile_mode)
+        metric("Compile", compile_mode)
+
+    lr_schedule_fn, n_epochs = build_lr_schedule(opt_cfg, config)
+    start_epoch = 0
+
+    if args.base:
+        from utils.learn.io import load_checkpoint as _load
+        ckpt = _load(str(_find_latest_checkpoint(Path(args.base))))
+        model.load_state_dict(ckpt["params"])
+        optimizer.load_state_dict(ckpt["opt_state"])
+        start_epoch = ckpt["epoch"] + 1
+        metric("Base", str(Path(args.base).resolve()))
+        metric("Resumed Epoch", start_epoch)
+    elif args.continue_:
+        from utils.learn.io import load_checkpoint as _load
+        ckpt = _load(str(_find_latest_checkpoint(Path(args.continue_))))
+        model.load_state_dict(ckpt["params"])
+        optimizer.load_state_dict(ckpt["opt_state"])
+        start_epoch = ckpt["epoch"] + 1
+        metric("Continue", str(Path(args.continue_).resolve()))
+        metric("Resumed Epoch", start_epoch)
+    elif args.resume or args.pretrained:
+        model, optimizer, start_epoch = load_checkpoint(args, model, optimizer)
+
+    make_train_loader, val_clips, n_batches = build_dataloaders(config)
+
+    if args.limit > 0:
+        n_batches = min(n_batches, args.limit)
+
+    output_dir = Path(config["output_directory"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.continue_:
+        run_dir = Path(args.continue_)
+        run_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        run_dir = output_dir / f"run_{datetime.now():%Y%m%d_%H%M%S}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+    cli.RUN_DIR = run_dir
+
+    writer = SummaryWriter(log_dir=str(run_dir / "tensorboard"))
+    tb_port = config.get("logging_settings", {}).get("tensorboard_port", 6006)
+    tb_proc = subprocess.Popen(
+        [
+            sys.executable, "-m", "tensorboard.main",
+            "--logdir", str(output_dir.resolve()),
+            "--port", str(tb_port),
+            "--host", "127.0.0.1",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    metric("Run Dir", str(run_dir))
+    metric("TensorBoard", f"http://127.0.0.1:{tb_port}")
+    metric("Device", str(device))
+    metric("Dtype", str(dtype).split(".")[-1])
+    divider()
+
+    val_batch_size = dataset_cfg.get("validation_batch_size", 2)
+    baseline = (
+        compute_baseline(config, val_clips, logging_cfg, run_dir, output_dir)
+        if val_clips
+        else {}
+    )
+
+    schedule = config.get("schedule", [])
+    if schedule:
+        loss_weights = dict(schedule[0]["weights"])
+    else:
+        loss_weights = {"charbonnier": 1.0, "rgb": 0.0}
+    criterion.update_weights(loss_weights)
+
+    best_score = float("-inf")
+
+    try:
+        exit_flag_ref = [False]
+        for epoch in range(start_epoch, n_epochs):
+            wu_weights = get_epoch_weights(epoch, schedule, loss_weights)
+            if wu_weights is not None:
+                merged = dict(loss_weights)
+                merged.update(wu_weights)
+                criterion.update_weights(merged)
+                loss_weights = merged
+                console.info(
+                    f"Epoch {epoch+1} weights: "
+                    + ", ".join(
+                        f"{k}={_fmt(v)}" for k, v in wu_weights.items() if k != "moe"
+                    )
+                )
+
+            if check_run_signals(run_dir, exit_flag_ref) or cli.EXIT_FLAG:
+                cli.EXIT_FLAG = True
+                save_epoch_checkpoint(
+                    max(0, epoch - 1),
+                    model.state_dict(),
+                    optimizer.state_dict(),
+                    0.0,
+                    {},
+                    0.0,
+                    0.0,
+                    loss_weights,
+                    run_dir,
+                    output_dir,
+                )
+                break
+
+            train_loader = make_train_loader()
+            train_loss = train_epoch(
+                model,
+                train_loader,
+                criterion,
+                optimizer,
+                config,
+                opt_cfg,
+                lr_schedule_fn,
+                device,
+                dtype,
+                run_dir=run_dir,
+                epoch=epoch,
+                n_epochs=n_epochs,
+                n_batches=n_batches,
+                scaler=scaler,
+                writer=writer,
+            )
+
+            if cli.EXIT_FLAG:
+                save_epoch_checkpoint(
+                    epoch,
+                    model.state_dict(),
+                    optimizer.state_dict(),
+                    train_loss,
+                    {},
+                    -train_loss * 10,
+                    0.0,
+                    loss_weights,
+                    run_dir,
+                    output_dir,
+                )
+                break
+
+            metrics = {}
+            avg_lr = 0.0
+            if epoch % logging_cfg.get("validation_interval", 1) == 0:
+                section(f"Epoch {epoch+1}/{n_epochs}  —  loss={train_loss:.8f}")
+                for name, clips in val_clips.items():
+                    psnr = ssim = vmaf = vgg = float("nan")
+                    try:
+                        psnr, ssim, vmaf, vgg = validate(
+                            model, device, clips, val_batch_size, name
+                        )
+                    except Exception as e:
+                        console.error(f"RGB validation failed for {name}: {e}")
+                    metrics[name] = {"psnr": psnr, "ssim": ssim, "vmaf": vmaf, "vgg": vgg}
+                    log_validation(name, psnr, ssim, vmaf, baseline, vgg=vgg)
+
+                    writer.add_scalar(f"Metrics/{name}/psnr", psnr, epoch)
+                    writer.add_scalar(f"Metrics/{name}/ssim", ssim, epoch)
+                    if vmaf > 0:
+                        writer.add_scalar(f"Metrics/{name}/vmaf", vmaf, epoch)
+                    if not (vgg is None or vgg != vgg):
+                        writer.add_scalar(f"Metrics/{name}/vgg", vgg, epoch)
+
+                avg_lr = float(
+                    lr_schedule_fn(epoch + n_batches / max(n_batches, 1))
+                )
+                divider()
+
+            score = composite_score(metrics, baseline, train_loss)
+            writer.add_scalar("Composite/score", score, epoch)
+            writer.flush()
+
+            if score > best_score:
+                best_score = score
+
+            save_epoch_checkpoint(
+                epoch,
+                model.state_dict(),
+                optimizer.state_dict(),
+                train_loss,
+                metrics,
+                score,
+                avg_lr,
+                loss_weights,
+                run_dir,
+                output_dir,
+            )
+    finally:
+        writer.close()
+        tb_proc.terminate()
+        try:
+            tb_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            tb_proc.kill()
+        stop_io_worker()
+
+
+if __name__ == "__main__":
+    main()

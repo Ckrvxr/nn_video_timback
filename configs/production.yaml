@@ -21,32 +21,46 @@ dataset:
 model_architecture:
   model_name: ArtRT
   dim: 48
-  n1: 6
+  n1: 8
   n2: 8
-  n3: 4
-  nmid: 4
+  n3: 8
+  nmid: 8
   compile: default
 
 training_settings:
-  batch_size: 8
-  num_epochs: 100
-  lr:
-    peak: 5.0e-5
-    min: 1.0e-6
-    period: 30
-  weight_decay: 1.0e-4
-  adam_beta1: 0.9
-  adam_beta2: 0.999
-  gradient_clipping_threshold: 1.0
-  gradient_accumulation_steps: 2
+  batch_size: 10
+  num_epochs: 1000
+  optimizer: prodigy
+  prodigy:
+    lr: 0.1
+    weight_decay: 1.0e-4
+    gradient_clipping_threshold: 1.0
+    gradient_accumulation_steps: 10
+    betas: [0.9, 0.999]
+    beta3: 0.99
+    d0: 1.0e-6
+    safeguard_warmup: true
+  adamw:
+    lr: 5.0e-5
+    weight_decay: 1.0e-4
+    gradient_clipping_threshold: 1.0
+    gradient_accumulation_steps: 2
+    betas: [0.9, 0.999]
+  sophia:
+    lr: 1.0e-4
+    weight_decay: 1.0e-1
+    gradient_clipping_threshold: 1.0
+    gradient_accumulation_steps: 2
+    betas: [0.9, 0.95]
+    rho: 0.04
+    hessian_update_freq: 10
 
 schedule:
   - epoch: 1+
     weights:
-      charbonnier: 0.999
-      fft: 0.001
-      # haarpsi: 5.0
-
+      charbonnier: 0.95
+      fft: 0.01
+      fbin: 0.04
 
 logging_settings:
   log_interval: 100

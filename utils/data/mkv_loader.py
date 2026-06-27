@@ -34,7 +34,7 @@ def _ffmpeg_to_yuv(path: Path) -> np.ndarray:
     cmd = [
         'ffmpeg', '-vsync', '0', '-hide_banner',
         '-i', str(path),
-        '-vf', "zscale=matrix=bt2020nc:transfer=bt709:primaries=bt709:range=full",
+        '-vf', "setparams=color_primaries=bt2020:color_trc=bt709, zscale=matrix=bt2020nc:transfer=bt709:primaries=bt709:range=full",
         '-f', 'rawvideo',
         '-pix_fmt', 'yuv444p12le',
         '-s', f'{width}x{height}',

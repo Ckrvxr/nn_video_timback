@@ -2,7 +2,6 @@ import argparse
 import os
 import random
 import signal
-import sys
 import time
 
 import numpy as np
@@ -27,28 +26,21 @@ def sigint_handler(signum, frame):
 
     signal.signal(signal.SIGINT, lambda s, f: os._exit(1))
 
-    # Try to restore terminal from tqdm raw mode.
-    try:
-        import termios
-        termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW,
-                          termios.tcgetattr(sys.stdin.fileno()))
-    except Exception:
-        try:
-            os.system('stty sane 2>/dev/null')
-        except Exception:
-            pass
-
     print("\n\033[33m═══ Graceful exit requested (Ctrl+C again to force) ═══\033[0m")
     EXIT_FLAG = True
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/default.yaml')
-    parser.add_argument('--resume', type=str, default=None)
-    parser.add_argument('--pretrained', type=str, default=None)
-    parser.add_argument('--seed', type=int, default=None)
-    parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument("--config", type=str, default="configs/default.yaml")
+    parser.add_argument("--base", type=str, default=None,
+                        help="Base run directory to fork from (saves to new run)")
+    parser.add_argument("--continue", dest="continue_", type=str, default=None,
+                        help="Run directory to continue training in-place")
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--pretrained", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--limit", type=int, default=0)
     return parser.parse_args()
 
 

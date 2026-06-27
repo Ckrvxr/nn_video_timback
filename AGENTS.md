@@ -11,12 +11,12 @@ Package/environment manager: **uv**. Never use `pip` or `python` directly.
 
 Single model file: `core/torch/artrt.py` (`ArtRT` class). No backward compatibility.
 - Data format: **NCHW** `[B, C, H, W]`, values are **linear RGB [0, 1]** float32/float16.
-- Pure CNN (no SSM, no attention, no wavelet). `NAFBlock` × N stacked in 3-level U-Net.
+- Pure CNN (no SSM, no attention, no wavelet). `R3Block` × N stacked in 2-level U-Net.
 - pixel_unshuffle(r=8) reduces internal resolution to H/8 × W/8.
-- Default: `dim=48, n1=6, n2=8, n3=4, nmid=4` (3.15M params) — micro-texture heavy, 4K@30Hz
-- Architecture: `head(192→C,1×1)` → `NAFUNet(C)` → `tail(C→192,1×1)` with pixel_unshuffle/shuffle.
-- NAFUNet: 3-level encoder-decoder with pixel_unshuffle/shuffle down/up and skip connections.
-- Each `NAFBlock`: `LayerNorm → expand(1×1, C→2C) → DWConv(3×3, groups=2C) → SimpleGate(split×multiply) → SCA → post(1×1, C→C) + shortcut`
+- Default: `dim=64, n1=8, n2=8, n3=8, nmid=8` — micro-texture heavy, 4K@30Hz
+- Architecture: `head(192→C,1×1)` → `R3UNet(C)` → `tail(C→192,1×1)` with pixel_unshuffle/shuffle (C=64).
+- R3UNet: 2-level encoder-decoder with pixel_unshuffle/shuffle down/up and skip connections.
+- Each `R3Block`: `RMSNorm → expand(1×1, C→2C) → DWConv(3×3, groups=2C) → SimpleGate(split×multiply) → SCA → post(1×1, C→C) → LayerScale(γx+β) → +shortcut`
 
 # Data pipe
 

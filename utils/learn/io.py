@@ -19,7 +19,7 @@ def _io_worker():
         try:
             fn(*args, **kwargs)
         except Exception as e:
-            console.error(f'Background IO failed: {e}')
+            console.error(f"Background IO failed: {e}")
 
 
 def start_io_worker():
@@ -38,39 +38,33 @@ def stop_io_worker():
 
 
 def _fmt_score(score: float) -> str:
-    """Format score with sign, e.g. ``+0.42`` ``-0.12``."""
-    return f'{score:+.4f}'
+    return f"{score:+.4f}"
 
 
-def save_epoch_checkpoint(epoch, params, opt_state, train_loss, metrics,
-                          score, lr, loss_weights, run_dir, output_dir):
-    """Save a per-epoch checkpoint with metadata.
-
-    Files written (via background I/O thread):
-      ``run_dir / epoch_{epoch:03d}_s{score}.pkl``
-      ``run_dir / last.pkl``                  — copy of latest
-      ``output_dir / last.pkl``               — global latest
-    """
+def save_epoch_checkpoint(
+    epoch, params, opt_state, train_loss, metrics,
+    score, lr, loss_weights, run_dir, output_dir,
+):
     score_str = _fmt_score(score)
-    filename = f'epoch_{epoch + 1:03d}_s{score_str}.pkl'
+    filename = f"epoch_{epoch + 1:03d}_s{score_str}.pkl"
     epoch_path = run_dir / filename
-    run_last = run_dir / 'last.pkl'
-    out_last = output_dir / 'last.pkl'
+    run_last = run_dir / "last.pkl"
+    out_last = output_dir / "last.pkl"
 
     ckpt = {
-        'epoch': epoch,
-        'params': params,
-        'opt_state': opt_state,
-        'train_loss': train_loss,
-        'metrics': metrics,
-        'score': score,
-        'score_str': score_str,
-        'lr': lr,
-        'loss_weights': loss_weights,
+        "epoch": epoch,
+        "params": params,
+        "opt_state": opt_state,
+        "train_loss": train_loss,
+        "metrics": metrics,
+        "score": score,
+        "score_str": score_str,
+        "lr": lr,
+        "loss_weights": loss_weights,
     }
 
     def _write():
-        with open(str(epoch_path), 'wb') as f:
+        with open(str(epoch_path), "wb") as f:
             pickle.dump(ckpt, f)
         shutil.copy2(str(epoch_path), str(run_last))
         shutil.copy2(str(epoch_path), str(out_last))
@@ -79,22 +73,21 @@ def save_epoch_checkpoint(epoch, params, opt_state, train_loss, metrics,
 
 
 def save_checkpoint(params, opt_state, epoch, run_dir, output_dir, **extra):
-    """Legacy save — keyed by epoch number, no metadata."""
-    score_str = _fmt_score(extra.get('score', 0.0))
-    filename = f'epoch_{epoch + 1:03d}_s{score_str}.pkl'
+    score_str = _fmt_score(extra.get("score", 0.0))
+    filename = f"epoch_{epoch + 1:03d}_s{score_str}.pkl"
     epoch_path = run_dir / filename
-    run_last = run_dir / 'last.pkl'
-    out_last = output_dir / 'last.pkl'
+    run_last = run_dir / "last.pkl"
+    out_last = output_dir / "last.pkl"
 
     ckpt = {
-        'epoch': epoch,
-        'params': params,
-        'opt_state': opt_state,
+        "epoch": epoch,
+        "params": params,
+        "opt_state": opt_state,
         **extra,
     }
 
     def _write():
-        with open(str(epoch_path), 'wb') as f:
+        with open(str(epoch_path), "wb") as f:
             pickle.dump(ckpt, f)
         shutil.copy2(str(epoch_path), str(run_last))
         shutil.copy2(str(epoch_path), str(out_last))
@@ -103,6 +96,5 @@ def save_checkpoint(params, opt_state, epoch, run_dir, output_dir, **extra):
 
 
 def load_checkpoint(path: str):
-    """Load a pickled checkpoint.  Returns the raw dict."""
-    with open(path, 'rb') as f:
+    with open(path, "rb") as f:
         return pickle.load(f)

@@ -34,62 +34,70 @@ def build_model_and_optimizer(config):
     n_params = sum(p.numel() for p in model.parameters())
     metric("Parameters", f"{n_params:,}")
 
-    lr_cfg = training_cfg.get('lr')
-    opt_lr = lr_cfg['peak'] if lr_cfg else training_cfg['learning_rate']
+    optimizer_name = training_cfg.get('optimizer', 'prodigy').lower()
+    opt_cfg = training_cfg[optimizer_name]
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=opt_lr,
-        betas=(training_cfg.get('adam_beta1', 0.9), training_cfg.get('adam_beta2', 0.999)),
-        weight_decay=training_cfg.get('weight_decay', 0.01),
-    )
+    def _as_float(v, default=0.0):
+        return float(v) if v is not None else default
+
+    if optimizer_name == 'adamw':
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=_as_float(opt_cfg.get('lr'), 5e-5),
+            betas=opt_cfg.get('betas', (0.9, 0.999)),
+            weight_decay=_as_float(opt_cfg.get('weight_decay'), 0.01),
+        )
+    elif optimizer_name == 'prodigy':
+        import prodigyopt
+        optimizer = prodigyopt.Prodigy(
+            model.parameters(),
+            lr=_as_float(opt_cfg.get('lr'), 1.0),
+            betas=opt_cfg.get('betas', (0.9, 0.999)),
+            weight_decay=_as_float(opt_cfg.get('weight_decay'), 0.0),
+            beta3=_as_float(opt_cfg.get('beta3'), 0.99),
+            d0=_as_float(opt_cfg.get('d0'), 1e-6),
+            safeguard_warmup=bool(opt_cfg.get('safeguard_warmup', True)),
+        )
+    elif optimizer_name == 'sophia':
+        from core.optim.sophia import SophiaG
+        optimizer = SophiaG(
+            model.parameters(),
+            lr=_as_float(opt_cfg.get('lr'), 1e-4),
+            betas=opt_cfg.get('betas', (0.9, 0.95)),
+            rho=_as_float(opt_cfg.get('rho'), 0.04),
+            weight_decay=_as_float(opt_cfg.get('weight_decay'), 1e-1),
+        )
+    else:
+        raise ValueError(f"Unknown optimizer: {optimizer_name}")
 
     schedule = config.get('schedule', [])
     if schedule:
         initial_weights = dict(schedule[0]['weights'])
     else:
-        initial_weights = {'charbonnier': 1.0, 'haarpsi': 0.0, 'fft': 0.0}
+        initial_weights = {'charbonnier': 1.0, 'fft': 0.0}
     criterion = CompositeLoss(initial_weights)
 
     sub_section("Training")
     loss_str = "  ".join(f"{k}={_fmt(v)}" for k, v in initial_weights.items())
     metric("Loss Weights", loss_str)
     metric("Batch Size", str(training_cfg['batch_size']))
-    metric("Grad Accum", str(training_cfg.get('gradient_accumulation_steps', 1)))
-    if lr_cfg:
-        period = lr_cfg.get('period', training_cfg['num_epochs'])
-        lr_str = f"cosine  peak={lr_cfg['peak']:.2e}  min={lr_cfg['min']:.2e}  period={period}ep"
-        metric("LR Schedule", lr_str)
-    else:
-        metric("Learning Rate", f"{opt_lr:.2e}")
+    metric("Grad Accum", str(opt_cfg.get('gradient_accumulation_steps', 1)))
+    metric("Optimizer", optimizer_name.capitalize())
+    metric("Learning Rate", f"{opt_cfg.get('lr', 1.0):.2e}")
     metric("Epochs", str(training_cfg['num_epochs']))
 
-    return model, optimizer, criterion
+    return model, optimizer, criterion, opt_cfg
 
 
-def build_lr_schedule(config):
+def build_lr_schedule(opt_cfg, config):
     training_cfg = config['training_settings']
-    lr_cfg = training_cfg.get('lr')
     n_epochs = training_cfg['num_epochs']
-
-    if lr_cfg:
-        peak = lr_cfg['peak']
-        min_lr = lr_cfg['min']
-        period = lr_cfg.get('period', n_epochs)
-
-        def schedule_fn(epoch):
-            frac = (epoch % period) / max(period - 1, 1)
-            cosine = 0.5 * (1 + torch.cos(torch.tensor(torch.pi * frac)))
-            return min_lr + (peak - min_lr) * cosine
-
-        return schedule_fn, n_epochs
-    else:
-        lr = training_cfg['learning_rate']
-        return lambda _: lr, n_epochs
+    lr = opt_cfg['lr']
+    return lambda _: lr, n_epochs
 
 
 class MKVIterableDataset(IterableDataset):
-    def __init__(self, clip_list, batch_size, prefetch=2, shuffle=True, mirror=False):
+    def __init__(self, clip_list, batch_size, prefetch=8, shuffle=True, mirror=False):
         self.clip_list = clip_list
         self.batch_size = batch_size
         self.prefetch = prefetch
@@ -187,8 +195,10 @@ def build_dataloaders(config):
     if mirror:
         metric("Mirror", "horizontal flip (2× data)")
 
+    n_workers = dataset_cfg.get('num_workers', 0)
+
     def make_train_loader():
-        return DataLoader(dataset, batch_size=None, num_workers=0)
+        return DataLoader(dataset, batch_size=None, num_workers=n_workers)
 
     val_clips = {}
     val_paths = dataset_cfg.get('val_dataset_paths', [])
@@ -208,16 +218,18 @@ def load_checkpoint(args, model, optimizer):
     if args.resume:
         from utils.learn.io import load_checkpoint as _load
         ckpt = _load(args.resume)
-        model.load_state_dict(ckpt['model'])
-        optimizer.load_state_dict(ckpt['optimizer'])
-        start_epoch = ckpt['epoch'] + 1
+        model.load_state_dict(ckpt.get('params', ckpt.get('model', ckpt)))
+        if 'opt_state' in ckpt:
+            optimizer.load_state_dict(ckpt['opt_state'])
+        elif 'optimizer' in ckpt:
+            optimizer.load_state_dict(ckpt['optimizer'])
+        start_epoch = ckpt.get('epoch', -1) + 1
     elif args.pretrained:
         from utils.learn.io import load_checkpoint as _load
         ckpt = _load(args.pretrained)
-        if 'model' in ckpt:
-            model.load_state_dict(ckpt['model'])
-        else:
-            model.load_state_dict(ckpt)
+        state = ckpt.get('params', ckpt.get('model', ckpt))
+        if isinstance(state, dict):
+            model.load_state_dict(state)
     return model, optimizer, start_epoch
 
 

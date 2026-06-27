@@ -19,7 +19,7 @@ def load_video(path):
     w, h = map(int, result.stdout.strip().split(','))
     proc = subprocess.run([
         'ffmpeg', '-vsync', '0', '-hide_banner', '-i', str(path),
-        '-vf', "zscale=matrix=bt2020nc:transfer=bt709:primaries=bt709:range=full",
+        '-vf', "setparams=color_primaries=bt2020:color_trc=bt709, zscale=matrix=bt2020nc:transfer=bt709:primaries=bt709:range=full",
         '-f', 'rawvideo', '-pix_fmt', 'yuv444p12le',
         '-s', f'{w}x{h}', 'pipe:1',
     ], capture_output=True, timeout=120)
@@ -32,7 +32,7 @@ def load_video(path):
 def main():
     lr_path = sys.argv[1]
     ckpt_path = sys.argv[2]
-    out_path = sys.argv[3] if len(sys.argv) > 3 else 'output.mp4'
+    out_path = sys.argv[3] if len(sys.argv) > 3 else 'output.mkv'
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dtype = torch.float16
@@ -42,8 +42,14 @@ def main():
         ckpt = pickle.load(f)
     state = ckpt.get('model', ckpt.get('params', ckpt))
     state = {k.replace('_orig_mod.', ''): v for k, v in state.items()}
+    dim = state['head.weight'].shape[0]
+    params_per_block = 7
+    n1 = sum(1 for k in state if k.startswith('body.enc1.')) // params_per_block
+    n2 = sum(1 for k in state if k.startswith('body.enc2.')) // params_per_block
+    n3 = sum(1 for k in state if k.startswith('body.dec2.')) // params_per_block
+    nmid = sum(1 for k in state if k.startswith('body.mid.')) // params_per_block
     from core import ArtRT
-    model = ArtRT().to(device)
+    model = ArtRT(dim=dim, n1=n1, n2=n2, n3=n3, nmid=nmid).to(device)
     model.load_state_dict(state, strict=True)
     model = model.to(device, dtype=torch.float16)
     model.eval()
@@ -62,8 +68,8 @@ def main():
         '-s', f'{w}x{h}', '-r', str(fps),
         '-i', 'pipe:0',
         '-vf', "lutrgb=r=gammaval(0.45):g=gammaval(0.45):b=gammaval(0.45)",
-        '-c:v', 'libx265', '-crf', '18', '-preset', 'fast',
-        '-pix_fmt', 'yuv420p10le',
+        '-c:v', 'libx265', '-preset', 'ultrafast', '-x265-params', 'lossless=1',
+        '-pix_fmt', 'yuv444p12le',
         out_path,
     ], stdin=subprocess.PIPE)
 

@@ -8,16 +8,20 @@ dependencies = [
     "numpy>=2.0.0",
     "opencv-python>=4.10.0",
     "pyyaml>=6.0",
-    "tqdm>=4.66",
     "av>=15.1.0,<18",
     "matplotlib>=3.10",
     "psutil>=7.2",
-    "loguru>=0.7",
+    "rich>=13.0",
+    "tensorboard>=2.18",
     "pytest>=9.1",
     "ruff>=0.4",
     "mamba-ssm>=2.0.0",
     "nvidia-cuda-runtime-cu12>=12.9.79",
     "causal-conv1d>=1.6.2.post1",
+    "prodigyopt>=1.0",
+    "tensorrt",
+    "gradio>=6.19.0",
+    "socksio>=1.0.0",
 ]
 
 [tool.uv.extra-build-dependencies]

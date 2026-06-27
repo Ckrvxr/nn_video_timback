@@ -3,6 +3,7 @@ random_seed: 42
 
 dataset:
   mirror: true
+  num_workers: 4
   dataset_paths:
     - ./datasets/synthetic
     - ./datasets/kpop/newjeans_attention
@@ -24,22 +25,38 @@ model_architecture:
 training_settings:
   batch_size: 4
   num_epochs: 5
-  lr:
-    peak: 1.0e-4
-    min: 1.0e-6
-    period: 5
-  weight_decay: 1.0e-4
-  adam_beta1: 0.9
-  adam_beta2: 0.95
-  gradient_clipping_threshold: 5.0
-  gradient_accumulation_steps: 1
+  optimizer: prodigy
+  prodigy:
+    lr: 0.5
+    weight_decay: 1.0e-4
+    gradient_clipping_threshold: 5.0
+    gradient_accumulation_steps: 1
+    betas: [0.9, 0.999]
+    beta3: 0.99
+    d0: 1.0e-6
+    safeguard_warmup: true
+  adamw:
+    lr: 1.0e-4
+    weight_decay: 1.0e-4
+    gradient_clipping_threshold: 5.0
+    gradient_accumulation_steps: 1
+    betas: [0.9, 0.95]
+  sophia:
+    lr: 1.0e-4
+    weight_decay: 1.0e-1
+    gradient_clipping_threshold: 5.0
+    gradient_accumulation_steps: 1
+    betas: [0.9, 0.95]
+    rho: 0.04
+    hessian_update_freq: 10
 
 schedule:
   - epoch: 0
     weights:
-      charbonnier: 1.0
-      fft: 0.2
-      # haarpsi: 5.0
+      charbonnier: 0.9
+      fft: 0.05
+      fbin: 0.05
+
 
 logging_settings:
   log_interval: 50
